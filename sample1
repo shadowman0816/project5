@@ -1,123 +1,92 @@
-package net.jpmchase.payroll.processor.service;
+package net.jpmchase.payroll.processor.aspect;
 
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import net.jpmchase.payroll.processor.model.*;
-import net.jpmchase.payroll.processor.registry.*;
-import net.jpmchase.payroll.processor.utils.*;
-import net.jpmchase.payroll.processor.exception.*;
+import net.jpmchase.payroll.processor.entity.EventLogEntity;
+import net.jpmchase.payroll.processor.enums.EventLogStatus;
+import net.jpmchase.payroll.processor.model.Event;
+import net.jpmchase.payroll.processor.repository.EventLogRepository;
+import org.aspectj.lang.ProceedingJoinPoint;
+import org.aspectj.lang.annotation.Around;
+import org.aspectj.lang.annotation.Aspect;
 import org.slf4j.MDC;
-import org.springframework.stereotype.Service;
+import org.springframework.stereotype.Component;
 
-import java.util.Optional;
+import java.time.Instant;
 
 @Slf4j
-@Service
-public class EventProcessorService {
+@Aspect
+@Component
+@RequiredArgsConstructor
+public class EventLogAspect {
 
-    private final StepRegistry stepRegistry;
-    private final ConditionRegistry conditionRegistry;
-    private final RetryScheduleService retryScheduleService;
+    private final EventLogRepository eventLogRepository;
 
-    public EventProcessorService(StepRegistry stepRegistry, ConditionRegistry conditionRegistry,
-                                 RetryScheduleService retryScheduleService) {
-        this.stepRegistry = stepRegistry;
-        this.conditionRegistry = conditionRegistry;
-        this.retryScheduleService = retryScheduleService;
-    }
+    private static final int MAX_REASON_LENGTH = 250;
+    private static final String CHANNEL_ID = "SYSTEM";
 
-    public void processEvent(Event event) {
+    @Around("@annotation(net.jpmchase.payroll.processor.annotation.TrackStep)")
+    public Object trackStepExecution(ProceedingJoinPoint joinPoint) throws Throwable {
+        Object[] args = joinPoint.getArgs();
+        if (args.length == 0 || !(args[0] instanceof Event)) {
+            log.warn("[EVENT-LOG] Skipping logging aspect – first argument is not Event");
+            return joinPoint.proceed();
+        }
+
+        Event event = (Event) args[0];
         String eventId = event.getMessageBody().getEventId();
-        MDC.put("eventId", eventId);  // Start MDC context
-        log.info("[PROCESSOR] Starting processing of event: {}", eventId);
+        String messageId = event.getMessageBody().getMessageId();
+        String stepName = joinPoint.getSignature().getName();
 
-        WorkflowContext context = new WorkflowContext();
-        context.setEvent(event);
+        // Set MDC for traceability
+        MDC.put("eventId", eventId);
+        MDC.put("messageId", messageId);
+        MDC.put("stepName", stepName);
+
+        log.info("[EVENT-LOG] Tracking execution of eventId={}, step={}", eventId, stepName);
+        updateEventLog(event, stepName, EventLogStatus.IN_PROCESS.getCode(), null);
 
         try {
-            for (StepConfig stepConfig : getStepsForEvent(event)) {
-                executeStepWithRetry(stepConfig, context, 0);
-            }
-            context.setStatus(WorkflowContext.Status.COMPLETED);
-            log.info("[PROCESSOR] Event processing completed for event: {}", eventId);
-        } catch (Exception e) {
-            context.setStatus(WorkflowContext.Status.FAILED);
-            log.error("[PROCESSOR] Event processing failed for event: {} - Reason: {}", eventId, e.getMessage(), e);
-            throw e;
+            Object result = joinPoint.proceed();
+
+            updateEventLog(event, stepName, EventLogStatus.COMPLETED.getCode(), null);
+            log.info("[EVENT-LOG] Step completed: eventId={}, step={}", eventId, stepName);
+            return result;
+
+        } catch (Throwable t) {
+            log.error("[EVENT-LOG] Step failed: eventId={}, step={}, reason={}", eventId, stepName, t.getMessage(), t);
+            updateEventLog(event, stepName, EventLogStatus.FAILED.getCode(), t.getMessage());
+            throw t;
         } finally {
-            MDC.clear();  // Always clean up to avoid leaking MDC between threads
+            MDC.clear();
         }
     }
 
-    private void executeStepWithRetry(StepConfig stepConfig, WorkflowContext context, int retryCount) {
-        String stepName = stepConfig.getName();
-        log.info("[PROCESSOR] Executing step '{}' (Attempt {}/{})", stepName, retryCount + 1, stepConfig.getImmediateRetryCount());
+    private void updateEventLog(Event event, String stepName, String status, String failureReason) {
+        EventLogEntity existingLog = eventLogRepository.findBySrcEvtId(event.getMessageBody().getEventId())
+                .orElse(null);
 
-        Step stepExecutor = stepRegistry.get(stepName);
-        if (stepExecutor == null) {
-            log.warn("[PROCESSOR] Step '{}' not found in registry. Skipping.", stepName);
+        if (existingLog == null) {
+            log.warn("[EVENT-LOG] No event log found for eventId={}", event.getMessageBody().getEventId());
             return;
         }
 
-        if (!shouldExecute(stepConfig, context)) {
-            log.info("[PROCESSOR] Skipping step '{}' due to failed condition evaluation.", stepName);
-            return;
-        }
+        String truncatedReason = failureReason != null
+                ? failureReason.substring(0, Math.min(MAX_REASON_LENGTH, failureReason.length()))
+                : null;
 
-        if (stepConfig.isDisableRetry()) {
-            try {
-                stepExecutor.execute(context);
-                context.setStatus(WorkflowContext.Status.SUCCESS);
-                log.info("[PROCESSOR] Step '{}' executed successfully (No retries).", stepName);
-            } catch (Exception e) {
-                context.setStatus(WorkflowContext.Status.FAILED);
-                log.error("[PROCESSOR] Step '{}' failed (No retries). Error: {}", stepName, e.getMessage(), e);
-                throw e;
-            }
-            return;
-        }
+        eventLogRepository.updateStatusById(
+                existingLog.getEventLogId(),
+                status,
+                truncatedReason,
+                CHANNEL_ID,
+                Instant.now()
+        );
 
-        String failureReason = "";
-        while (retryCount < stepConfig.getImmediateRetryCount()) {
-            try {
-                stepExecutor.execute(context);
-                context.setStatus(WorkflowContext.Status.SUCCESS);
-                log.info("[PROCESSOR] Step '{}' executed successfully on attempt {}/{}", stepName, retryCount + 1, stepConfig.getImmediateRetryCount());
-                return;
-            } catch (Exception e) {
-                retryCount++;
-                failureReason = e.getMessage();
-                log.warn("[PROCESSOR] Step '{}' failed on attempt {}/{}. Retrying... Reason: {}", stepName, retryCount, stepConfig.getImmediateRetryCount(), failureReason);
-            }
-        }
-
-        log.error("[PROCESSOR] Step '{}' failed after {} attempts. Scheduling backoff retry.", stepName, stepConfig.getImmediateRetryCount());
-        context.setStatus(WorkflowContext.Status.FAILED);
-        retryScheduleService.scheduleRetry(stepConfig, context, failureReason);
-    }
-
-    private boolean shouldExecute(StepConfig stepConfig, WorkflowContext context) {
-        String conditionName = stepConfig.getExecuteOnCondition();
-        if (conditionName == null || "always".equalsIgnoreCase(conditionName)) {
-            return true;
-        }
-
-        try {
-            ExecutionCondition condition = conditionRegistry.get(conditionName);
-            if (condition == null) {
-                log.warn("[PROCESSOR] No condition bean found for '{}'. Skipping execution.", conditionName);
-                return false;
-            }
-            return condition.evaluate(context);
-        } catch (Exception e) {
-            log.error("[PROCESSOR] Failed to evaluate condition '{}'. Error: {}", conditionName, e.getMessage(), e);
-            return false;
-        }
-    }
-
-    private Iterable<StepConfig> getStepsForEvent(Event event) {
-        // This method should retrieve step configurations from metadata/yaml registry
-        return WorkflowRegistry.getWorkflowSteps(event.getEventType());
+        log.info("[EVENT-LOG] Updated eventLog: eventId={}, step={}, status={}, reason={}",
+                event.getMessageBody().getEventId(),
+                stepName,
+                status,
+                truncatedReason);
     }
 }
-
-
