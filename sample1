@@ -1,92 +1,68 @@
-package net.jpmchase.payroll.processor.aspect;
+package net.jpmchase.payroll.processor.steps.payee;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import net.jpmchase.payroll.processor.entity.EventLogEntity;
-import net.jpmchase.payroll.processor.enums.EventLogStatus;
+import net.jpmchase.payroll.processor.enums.PayeeType;
+import net.jpmchase.payroll.processor.exception.BusinessException;
 import net.jpmchase.payroll.processor.model.Event;
-import net.jpmchase.payroll.processor.repository.EventLogRepository;
-import org.aspectj.lang.ProceedingJoinPoint;
-import org.aspectj.lang.annotation.Around;
-import org.aspectj.lang.annotation.Aspect;
+import net.jpmchase.payroll.processor.model.MessageBody;
+import net.jpmchase.payroll.processor.model.WorkflowContext;
+import net.jpmchase.payroll.processor.step.Step;
 import org.slf4j.MDC;
 import org.springframework.stereotype.Component;
 
-import java.time.Instant;
+import java.util.Optional;
+import java.util.UUID;
+
+import static net.jpmchase.payroll.processor.constants.ContextKeys.*;
+import static net.jpmchase.payroll.processor.enums.ErrorCode.MISSING_REQUIRED_ID;
 
 @Slf4j
-@Aspect
-@Component
+@Component("ReadIncomingContractorBankAccountEvent")
 @RequiredArgsConstructor
-public class EventLogAspect {
+public class ReadContractorBankAccountEventStep implements Step {
 
-    private final EventLogRepository eventLogRepository;
+    @Override
+    public void execute(WorkflowContext context) {
+        Event event = context.get(EVENT, Event.class);
 
-    private static final int MAX_REASON_LENGTH = 250;
-    private static final String CHANNEL_ID = "SYSTEM";
+        String messageId = Optional.of(event)
+                .map(Event::getMessageId)
+                .orElseThrow(() -> new BusinessException(MISSING_REQUIRED_ID.formatMessage("Message Id"), MISSING_REQUIRED_ID));
 
-    @Around("@annotation(net.jpmchase.payroll.processor.annotation.TrackStep)")
-    public Object trackStepExecution(ProceedingJoinPoint joinPoint) throws Throwable {
-        Object[] args = joinPoint.getArgs();
-        if (args.length == 0 || !(args[0] instanceof Event)) {
-            log.warn("[EVENT-LOG] Skipping logging aspect – first argument is not Event");
-            return joinPoint.proceed();
-        }
+        String employeeId = Optional.of(event)
+                .map(Event::getMessageBody)
+                .map(MessageBody::getReferences)
+                .map(map -> map.get("employee_uuid"))
+                .map(UUID::toString)
+                .orElseThrow(() -> new BusinessException(MISSING_REQUIRED_ID.formatMessage("Employee Id"), MISSING_REQUIRED_ID));
 
-        Event event = (Event) args[0];
-        String eventId = event.getMessageBody().getEventId();
-        String messageId = event.getMessageBody().getMessageId();
-        String stepName = joinPoint.getSignature().getName();
+        String companyId = Optional.of(event)
+                .map(Event::getMessageBody)
+                .map(MessageBody::getReferences)
+                .map(map -> map.get("company_uuid"))
+                .map(UUID::toString)
+                .orElseThrow(() -> new BusinessException(MISSING_REQUIRED_ID.formatMessage("Company Id"), MISSING_REQUIRED_ID));
 
-        // Set MDC for traceability
-        MDC.put("eventId", eventId);
+        String bankAccountUUID = Optional.of(event)
+                .map(Event::getMessageBody)
+                .map(MessageBody::getEntityUUID)
+                .map(UUID::toString)
+                .orElseThrow(() -> new BusinessException(MISSING_REQUIRED_ID.formatMessage("Bank Account Id"), MISSING_REQUIRED_ID));
+
+        // Put values into context
+        context.put(MESSAGE_ID, messageId);
+        context.put(SRC_PAYEE_ID, employeeId);
+        context.put(COMPANY_UUID, companyId);
+        context.put(BANK_ACCOUNT_UUID, bankAccountUUID);
+        context.put(PAYEE_TYPE, PayeeType.INDIVIDUAL_CONTRACTOR.name());
+
+        // Set MDC for traceability across all downstream logs
+        MDC.put("eventId", event.getMessageBody().getEventId());
         MDC.put("messageId", messageId);
-        MDC.put("stepName", stepName);
+        MDC.put("stepName", "ReadIncomingContractorBankAccountEvent");
 
-        log.info("[EVENT-LOG] Tracking execution of eventId={}, step={}", eventId, stepName);
-        updateEventLog(event, stepName, EventLogStatus.IN_PROCESS.getCode(), null);
-
-        try {
-            Object result = joinPoint.proceed();
-
-            updateEventLog(event, stepName, EventLogStatus.COMPLETED.getCode(), null);
-            log.info("[EVENT-LOG] Step completed: eventId={}, step={}", eventId, stepName);
-            return result;
-
-        } catch (Throwable t) {
-            log.error("[EVENT-LOG] Step failed: eventId={}, step={}, reason={}", eventId, stepName, t.getMessage(), t);
-            updateEventLog(event, stepName, EventLogStatus.FAILED.getCode(), t.getMessage());
-            throw t;
-        } finally {
-            MDC.clear();
-        }
-    }
-
-    private void updateEventLog(Event event, String stepName, String status, String failureReason) {
-        EventLogEntity existingLog = eventLogRepository.findBySrcEvtId(event.getMessageBody().getEventId())
-                .orElse(null);
-
-        if (existingLog == null) {
-            log.warn("[EVENT-LOG] No event log found for eventId={}", event.getMessageBody().getEventId());
-            return;
-        }
-
-        String truncatedReason = failureReason != null
-                ? failureReason.substring(0, Math.min(MAX_REASON_LENGTH, failureReason.length()))
-                : null;
-
-        eventLogRepository.updateStatusById(
-                existingLog.getEventLogId(),
-                status,
-                truncatedReason,
-                CHANNEL_ID,
-                Instant.now()
-        );
-
-        log.info("[EVENT-LOG] Updated eventLog: eventId={}, step={}, status={}, reason={}",
-                event.getMessageBody().getEventId(),
-                stepName,
-                status,
-                truncatedReason);
+        log.info("[STEP] Initialized context for contractor bank account event: eventId={}, messageId={}, employeeId={}, companyId={}, bankAccountUUID={}",
+                event.getMessageBody().getEventId(), messageId, employeeId, companyId, bankAccountUUID);
     }
 }
