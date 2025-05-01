@@ -2,121 +2,117 @@ package net.jpmchase.payroll.processor.steps.payee;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import net.jpmchase.payroll.processor.client.gusto.PaymentConfigurationService;
 import net.jpmchase.payroll.processor.constants.ContextKeys;
-import net.jpmchase.payroll.processor.entity.PayeeAccountAuditEntity;
-import net.jpmchase.payroll.processor.entity.PayeeAccountEntity;
-import net.jpmchase.payroll.processor.enums.AccountStatus;
-import net.jpmchase.payroll.processor.enums.ErrorCode;
-import net.jpmchase.payroll.processor.exception.ProcessorException;
-import net.jpmchase.payroll.processor.model.PaymentConfiguration;
-import net.jpmchase.payroll.processor.model.Split;
+import net.jpmchase.payroll.processor.entity.ContractorPaymentEntity;
+import net.jpmchase.payroll.processor.entity.ContractorPaymentGroupEntity;
+import net.jpmchase.payroll.processor.entity.PayeeEntity;
+import net.jpmchase.payroll.processor.enums.PayrollStatus;
 import net.jpmchase.payroll.processor.model.WorkflowContext;
-import net.jpmchase.payroll.processor.repository.PayeeAccountAuditRepository;
+import net.jpmchase.payroll.processor.repository.ContractorPaymentGroupRepository;
+import net.jpmchase.payroll.processor.repository.ContractorPaymentRepository;
 import net.jpmchase.payroll.processor.repository.PayeeAccountRepository;
+import net.jpmchase.payroll.processor.repository.PayeeRepository;
 import net.jpmchase.payroll.processor.step.Step;
 import org.slf4j.MDC;
 import org.springframework.stereotype.Component;
-import org.springframework.transaction.annotation.Transactional;
 
-import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
+import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static net.jpmchase.payroll.processor.constants.ContextKeys.*;
 
 @Slf4j
-@Component("PayeeAccountStatusDeactivator")
+@Component("DeterminePayrollInProgressForAContractor")
 @RequiredArgsConstructor
-public class PayeeAccountStatusDeactivatorStep implements Step {
+public class PayrollInProgressForContractorDeterminationStep implements Step {
 
-    private final PayeeAccountRepository payeeAccountRepository;
-    private final PayeeAccountAuditRepository payeeAccountAuditRepository;
+    private final ContractorPaymentGroupRepository contractorPaymentGroupRepository;
+    private final ContractorPaymentRepository contractorPaymentRepository;
+    private final PayeeRepository payeeRepository;
 
     @Override
-    @Transactional
     public void execute(WorkflowContext context) {
+        String payeeId = context.get(SRC_PAYEE_ID, String.class);
         String eventId = context.get(EVENT_ID, String.class);
         String messageId = context.get(MESSAGE_ID, String.class);
-        String stepName = "PayeeAccountStatusDeactivator";
-        String payeeId = context.get(SRC_PAYEE_ID, String.class);
-        String bankAccountUUID = context.get(BANK_ACCOUNT_UUID, String.class);
-        PaymentConfiguration paymentConfig = context.get(GUSTO_PAYEE_PAYMENT_CONFIGURATION, PaymentConfiguration.class);
-        List<Split> splits = Optional.ofNullable(paymentConfig.getSplits()).orElse(List.of());
+        String stepName = "DeterminePayrollInProgressForAContractor";
 
-        // Set MDC
         MDC.put("eventId", eventId);
         MDC.put("messageId", messageId);
         MDC.put("stepName", stepName);
 
-        log.info("[STEP] Starting PayeeAccount deactivation for eventId={}, messageId={}, payeeId={}, bankAccountUUID={}",
-                eventId, messageId, payeeId, bankAccountUUID);
+        log.info("[STEP] Checking if payroll is in progress for contractor payeeId={}", payeeId);
 
-        validateBankAccountNotExistsInGusto(bankAccountUUID, splits);
+        Optional<PayeeEntity> payeeOpt = validateAndLoadPayee(payeeId);
+        if (payeeOpt.isEmpty()) {
+            setPayrollInProgressToContext(context, false);
+            return;
+        }
 
-        PayeeAccountEntity payeeAcct = payeeAccountRepository.findBySourceBankId(bankAccountUUID)
-                .orElseThrow(() -> new ProcessorException(
-                        ErrorCode.EMP_BANK_ACCOUNT_NOT_FOUND.getCode(),
-                        ErrorCode.EMP_BANK_ACCOUNT_NOT_FOUND.formatMessage(bankAccountUUID)
-                ));
+        PayeeEntity payee = payeeOpt.get();
+        UUID pyrlEnrlId = payee.getPyrlEnrlId();
+        if (pyrlEnrlId == null) {
+            log.info("[STEP] No payroll enrollment ID found for payeeId={}. Skipping.", payeeId);
+            setPayrollInProgressToContext(context, false);
+            return;
+        }
 
-        copyToAudit(payeeAcct, messageId);
-        deactivateBankAccount(bankAccountUUID, payeeAcct);
+        AtomicBoolean inProgress = new AtomicBoolean(false);
+        List<String> excludedStatusCodes = List.of(
+                PayrollStatus.CANCELLED.getCode(),
+                PayrollStatus.REJECTED.getCode(),
+                PayrollStatus.PROCESSED.getCode()
+        );
 
-        log.info("[STEP] Payee bank account deactivated successfully: payeeId={}, bankAccountUUID={}", payeeId, bankAccountUUID);
-    }
+        List<ContractorPaymentGroupEntity> groupList =
+                contractorPaymentGroupRepository.findByEnrollmentIdAndCPStatusCode(pyrlEnrlId, excludedStatusCodes);
 
-    private void validateBankAccountNotExistsInGusto(String bankAccountUUID, List<Split> splits) {
-        boolean exists = splits.stream()
-                .map(Split::getBankAccountUUID)
-                .anyMatch(uuid -> uuid != null && uuid.equalsIgnoreCase(bankAccountUUID));
+        for (ContractorPaymentGroupEntity group : groupList) {
+            boolean found = checkPayrollInProgressForPayee(payeeId, group);
+            if (found) {
+                inProgress.set(true);
+                break;
+            }
+        }
 
-        if (exists) {
-            log.warn("[STEP] Bank account UUID still exists in Gusto. Marking event as failed. UUID={}", bankAccountUUID);
-            throw new ProcessorException(
-                    ErrorCode.BANK_ACCOUNT_EXISTS_IN_VENDOR_BUT_DEL_EVT_RECEIVED.getCode(),
-                    ErrorCode.BANK_ACCOUNT_EXISTS_IN_VENDOR_BUT_DEL_EVT_RECEIVED.formatMessage(bankAccountUUID)
-            );
+        setPayrollInProgressToContext(context, inProgress.get());
+        if (inProgress.get()) {
+            log.info("[STEP] Payroll is currently in progress for payeeId={}. Aborting downstream steps.", payeeId);
+        } else {
+            log.info("[STEP] No active payroll found for payeeId={}. Continuing processing.", payeeId);
         }
     }
 
-    private void deactivateBankAccount(String bankAccountUUID, PayeeAccountEntity payeeAcct) {
-        payeeAccountRepository.updateStatusBySrcBnkId(
-                bankAccountUUID,
-                AccountStatus.PENDING_CHANGE.getCode(),
-                ContextKeys.EVENT_UPDATED_USERID,
-                Instant.now(),
-                payeeAcct.getUpdtTs()
-        );
+    private Optional<PayeeEntity> validateAndLoadPayee(String payeeId) {
+        Optional<PayeeEntity> payeeOpt = payeeRepository.findById(payeeId);
+        if (payeeOpt.isEmpty()) {
+            log.info("[STEP] No PayeeEntity found for payeeId={}. Treating as valid and skipping.", payeeId);
+        }
+        return payeeOpt;
     }
 
-    private void copyToAudit(PayeeAccountEntity source, String messageId) {
-        PayeeAccountAuditEntity target = new PayeeAccountAuditEntity();
+    private boolean checkPayrollInProgressForPayee(String payeeId, ContractorPaymentGroupEntity groupEntity) {
+        String groupId = groupEntity.getId().getSrcCntrPymtGpId();
+        List<ContractorPaymentEntity> payments = contractorPaymentRepository.findBySrcCntrPymtGpId(groupId);
 
-        target.setPyrPayeeAcctId(source.getPyrPayeeAcctId());
-        target.setSrcPayeeId(source.getSrcPayeeId());
-        target.setPyrEnrlId(source.getPyrEnrlId());
-        target.setSrcCntrPmtAcctId(source.getSrcCntrPmtAcctId());
-        target.setSrcBnkId(source.getSrcBnkId());
-        target.setBnkNm(source.getBnkNm());
-        target.setSplitTypeNm(source.getSplitTypeNm());
-        target.setPyrPmtNb(source.getPyrPmtNb());
-        target.setPayeeAcctStsCd(source.getPayeeAcctStsCd());
-        target.setErrCd(source.getErrCd());
-        target.setErrDescTx(source.getErrDescTx());
-        target.setPyrDLvryTypeCd(source.getPyrDLvryTypeCd());
-        target.setSrcEvtId(source.getSrcEvtId());
+        if (payments == null || payments.isEmpty()) {
+            log.info("[STEP] No contractor payments found under groupId={} for payeeId={}.", groupId, payeeId);
+            return false;
+        }
 
-        target.setId(System.currentTimeMillis());
-        target.setApplId(EVENT_UPDATED_USERID);
-        target.setMessageId(messageId);
-        target.setChnlId(CHANNEL_ID);
-        target.setCreUsrId("SYSTEM");
-        target.setCreTs(Instant.now());
-        target.setUpdtUsrId(EVENT_UPDATED_USERID);
-        target.setUpdtTs(Instant.now());
+        for (ContractorPaymentEntity payment : payments) {
+            if (payeeId.equals(payment.getPayeeId())) {
+                log.info("[STEP] Payroll match found in groupId={} for payeeId={}.", groupId, payeeId);
+                return true;
+            }
+        }
 
-        payeeAccountAuditRepository.save(target);
-        log.info("[STEP] Audit copy of PayeeAccountEntity created successfully. messageId={}", messageId);
+        return false;
+    }
+
+    private void setPayrollInProgressToContext(WorkflowContext context, boolean value) {
+        context.put(ContextKeys.PAYROLL_IN_PROGRESS, value);
     }
 }
