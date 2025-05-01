@@ -1,77 +1,122 @@
-package net.jpmchase.payroll.processor.steps.payee.gusto;
+package net.jpmchase.payroll.processor.steps.payee;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import net.jpmchase.payroll.processor.client.gusto.PaymentConfigurationService;
-import net.jpmchase.payroll.processor.entity.PayeeEntity;
-import net.jpmchase.payroll.processor.enums.PayeeStatus;
-import net.jpmchase.payroll.processor.enums.PayeeType;
+import net.jpmchase.payroll.processor.constants.ContextKeys;
+import net.jpmchase.payroll.processor.entity.PayeeAccountAuditEntity;
+import net.jpmchase.payroll.processor.entity.PayeeAccountEntity;
+import net.jpmchase.payroll.processor.enums.AccountStatus;
 import net.jpmchase.payroll.processor.enums.ErrorCode;
 import net.jpmchase.payroll.processor.exception.ProcessorException;
+import net.jpmchase.payroll.processor.model.PaymentConfiguration;
+import net.jpmchase.payroll.processor.model.Split;
 import net.jpmchase.payroll.processor.model.WorkflowContext;
-import net.jpmchase.payroll.processor.repository.CompanyEnrollmentRepository;
-import net.jpmchase.payroll.processor.repository.PayeeRepository;
+import net.jpmchase.payroll.processor.repository.PayeeAccountAuditRepository;
+import net.jpmchase.payroll.processor.repository.PayeeAccountRepository;
 import net.jpmchase.payroll.processor.step.Step;
 import org.slf4j.MDC;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.annotation.Transactional;
 
-import java.util.Objects;
+import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 
 import static net.jpmchase.payroll.processor.constants.ContextKeys.*;
 
 @Slf4j
-@Component("FetchPayeeBankAccountInformationFromGusto")
+@Component("PayeeAccountStatusDeactivator")
 @RequiredArgsConstructor
-public class GustoPayeeBankAccountRetrievalStep implements Step {
+public class PayeeAccountStatusDeactivatorStep implements Step {
 
-    private final PaymentConfigurationService paymentConfigurationService;
-    private final CompanyEnrollmentRepository companyEnrollmentRepository;
-    private final PayeeRepository payeeRepository;
+    private final PayeeAccountRepository payeeAccountRepository;
+    private final PayeeAccountAuditRepository payeeAccountAuditRepository;
 
     @Override
+    @Transactional
     public void execute(WorkflowContext context) {
-        String payeeId = context.get(SRC_PAYEE_ID, String.class);
-        String bankAccountUUID = context.get(BANK_ACCOUNT_UUID, String.class);
-        String companyId = context.get(COMPANY_UUID, String.class);
-        String payeeType = context.get(PAYEE_TYPE, String.class);
         String eventId = context.get(EVENT_ID, String.class);
         String messageId = context.get(MESSAGE_ID, String.class);
+        String stepName = "PayeeAccountStatusDeactivator";
+        String payeeId = context.get(SRC_PAYEE_ID, String.class);
+        String bankAccountUUID = context.get(BANK_ACCOUNT_UUID, String.class);
+        PaymentConfiguration paymentConfig = context.get(GUSTO_PAYEE_PAYMENT_CONFIGURATION, PaymentConfiguration.class);
+        List<Split> splits = Optional.ofNullable(paymentConfig.getSplits()).orElse(List.of());
 
-        // Set MDC for logging traceability
+        // Set MDC
         MDC.put("eventId", eventId);
         MDC.put("messageId", messageId);
-        MDC.put("stepName", "FetchPayeeBankAccountInformationFromGusto");
+        MDC.put("stepName", stepName);
 
-        log.info("[STEP] Fetching Gusto payment configuration for companyId={}, payeeId={}, bankAccountUUID={}, payeeType={}",
-                companyId, payeeId, bankAccountUUID, payeeType);
+        log.info("[STEP] Starting PayeeAccount deactivation for eventId={}, messageId={}, payeeId={}, bankAccountUUID={}",
+                eventId, messageId, payeeId, bankAccountUUID);
 
-        var enrollmentOpt = companyEnrollmentRepository.findEntpPrtyIdBySrcCoId(companyId);
-        if (enrollmentOpt.isEmpty()) {
-            throw new ProcessorException(ErrorCode.ENROLLMENT_INCOMPLETE.getCode(),
-                    ErrorCode.ENROLLMENT_INCOMPLETE.formatMessage(companyId));
+        validateBankAccountNotExistsInGusto(bankAccountUUID, splits);
+
+        PayeeAccountEntity payeeAcct = payeeAccountRepository.findBySourceBankId(bankAccountUUID)
+                .orElseThrow(() -> new ProcessorException(
+                        ErrorCode.EMP_BANK_ACCOUNT_NOT_FOUND.getCode(),
+                        ErrorCode.EMP_BANK_ACCOUNT_NOT_FOUND.formatMessage(bankAccountUUID)
+                ));
+
+        copyToAudit(payeeAcct, messageId);
+        deactivateBankAccount(bankAccountUUID, payeeAcct);
+
+        log.info("[STEP] Payee bank account deactivated successfully: payeeId={}, bankAccountUUID={}", payeeId, bankAccountUUID);
+    }
+
+    private void validateBankAccountNotExistsInGusto(String bankAccountUUID, List<Split> splits) {
+        boolean exists = splits.stream()
+                .map(Split::getBankAccountUUID)
+                .anyMatch(uuid -> uuid != null && uuid.equalsIgnoreCase(bankAccountUUID));
+
+        if (exists) {
+            log.warn("[STEP] Bank account UUID still exists in Gusto. Marking event as failed. UUID={}", bankAccountUUID);
+            throw new ProcessorException(
+                    ErrorCode.BANK_ACCOUNT_EXISTS_IN_VENDOR_BUT_DEL_EVT_RECEIVED.getCode(),
+                    ErrorCode.BANK_ACCOUNT_EXISTS_IN_VENDOR_BUT_DEL_EVT_RECEIVED.formatMessage(bankAccountUUID)
+            );
         }
+    }
 
-        Optional<PayeeEntity> payeeOpt = payeeRepository.findBySrcPayeeId(payeeId);
-        if (payeeOpt.isEmpty()) {
-            throw new ProcessorException(ErrorCode.PAYEE_NOT_FOUND.getCode(),
-                    ErrorCode.PAYEE_NOT_FOUND.formatMessage(payeeId));
-        }
+    private void deactivateBankAccount(String bankAccountUUID, PayeeAccountEntity payeeAcct) {
+        payeeAccountRepository.updateStatusBySrcBnkId(
+                bankAccountUUID,
+                AccountStatus.PENDING_CHANGE.getCode(),
+                ContextKeys.EVENT_UPDATED_USERID,
+                Instant.now(),
+                payeeAcct.getUpdtTs()
+        );
+    }
 
-        PayeeEntity payee = payeeOpt.get();
-        if (!Objects.equals(PayeeStatus.ACTIVE.getCode(), payee.getPayeeStsCd())) {
-            throw new ProcessorException(ErrorCode.PAYEE_ONBOARDING_INCOMPLETE.getCode(),
-                    ErrorCode.PAYEE_ONBOARDING_INCOMPLETE.formatMessage(payeeId));
-        }
+    private void copyToAudit(PayeeAccountEntity source, String messageId) {
+        PayeeAccountAuditEntity target = new PayeeAccountAuditEntity();
 
-        if (payeeType.equalsIgnoreCase(PayeeType.EMPLOYEE.getName())) {
-            var config = paymentConfigurationService.getPaymentConfigurationsForAnEmployee(enrollmentOpt.get(), payeeId);
-            context.put(GUSTO_PAYEE_PAYMENT_CONFIGURATION, config);
-            log.info("[STEP] Employee payment configuration successfully retrieved from Gusto for payeeId={}", payeeId);
-        } else {
-            var config = paymentConfigurationService.getPaymentConfigurationsForAContractor(enrollmentOpt.get(), payeeId);
-            context.put(GUSTO_PAYEE_PAYMENT_CONFIGURATION, config);
-            log.info("[STEP] Contractor payment configuration successfully retrieved from Gusto for payeeId={}", payeeId);
-        }
+        target.setPyrPayeeAcctId(source.getPyrPayeeAcctId());
+        target.setSrcPayeeId(source.getSrcPayeeId());
+        target.setPyrEnrlId(source.getPyrEnrlId());
+        target.setSrcCntrPmtAcctId(source.getSrcCntrPmtAcctId());
+        target.setSrcBnkId(source.getSrcBnkId());
+        target.setBnkNm(source.getBnkNm());
+        target.setSplitTypeNm(source.getSplitTypeNm());
+        target.setPyrPmtNb(source.getPyrPmtNb());
+        target.setPayeeAcctStsCd(source.getPayeeAcctStsCd());
+        target.setErrCd(source.getErrCd());
+        target.setErrDescTx(source.getErrDescTx());
+        target.setPyrDLvryTypeCd(source.getPyrDLvryTypeCd());
+        target.setSrcEvtId(source.getSrcEvtId());
+
+        target.setId(System.currentTimeMillis());
+        target.setApplId(EVENT_UPDATED_USERID);
+        target.setMessageId(messageId);
+        target.setChnlId(CHANNEL_ID);
+        target.setCreUsrId("SYSTEM");
+        target.setCreTs(Instant.now());
+        target.setUpdtUsrId(EVENT_UPDATED_USERID);
+        target.setUpdtTs(Instant.now());
+
+        payeeAccountAuditRepository.save(target);
+        log.info("[STEP] Audit copy of PayeeAccountEntity created successfully. messageId={}", messageId);
     }
 }
