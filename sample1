@@ -1,68 +1,77 @@
-package net.jpmchase.payroll.processor.steps.payee;
+package net.jpmchase.payroll.processor.steps.payee.gusto;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import net.jpmchase.payroll.processor.client.gusto.PaymentConfigurationService;
+import net.jpmchase.payroll.processor.entity.PayeeEntity;
+import net.jpmchase.payroll.processor.enums.PayeeStatus;
 import net.jpmchase.payroll.processor.enums.PayeeType;
-import net.jpmchase.payroll.processor.exception.BusinessException;
-import net.jpmchase.payroll.processor.model.Event;
-import net.jpmchase.payroll.processor.model.MessageBody;
+import net.jpmchase.payroll.processor.enums.ErrorCode;
+import net.jpmchase.payroll.processor.exception.ProcessorException;
 import net.jpmchase.payroll.processor.model.WorkflowContext;
+import net.jpmchase.payroll.processor.repository.CompanyEnrollmentRepository;
+import net.jpmchase.payroll.processor.repository.PayeeRepository;
 import net.jpmchase.payroll.processor.step.Step;
 import org.slf4j.MDC;
 import org.springframework.stereotype.Component;
 
+import java.util.Objects;
 import java.util.Optional;
-import java.util.UUID;
 
 import static net.jpmchase.payroll.processor.constants.ContextKeys.*;
-import static net.jpmchase.payroll.processor.enums.ErrorCode.MISSING_REQUIRED_ID;
 
 @Slf4j
-@Component("ReadIncomingContractorBankAccountEvent")
+@Component("FetchPayeeBankAccountInformationFromGusto")
 @RequiredArgsConstructor
-public class ReadContractorBankAccountEventStep implements Step {
+public class GustoPayeeBankAccountRetrievalStep implements Step {
+
+    private final PaymentConfigurationService paymentConfigurationService;
+    private final CompanyEnrollmentRepository companyEnrollmentRepository;
+    private final PayeeRepository payeeRepository;
 
     @Override
     public void execute(WorkflowContext context) {
-        Event event = context.get(EVENT, Event.class);
+        String payeeId = context.get(SRC_PAYEE_ID, String.class);
+        String bankAccountUUID = context.get(BANK_ACCOUNT_UUID, String.class);
+        String companyId = context.get(COMPANY_UUID, String.class);
+        String payeeType = context.get(PAYEE_TYPE, String.class);
+        String eventId = context.get(EVENT_ID, String.class);
+        String messageId = context.get(MESSAGE_ID, String.class);
 
-        String messageId = Optional.of(event)
-                .map(Event::getMessageId)
-                .orElseThrow(() -> new BusinessException(MISSING_REQUIRED_ID.formatMessage("Message Id"), MISSING_REQUIRED_ID));
-
-        String employeeId = Optional.of(event)
-                .map(Event::getMessageBody)
-                .map(MessageBody::getReferences)
-                .map(map -> map.get("employee_uuid"))
-                .map(UUID::toString)
-                .orElseThrow(() -> new BusinessException(MISSING_REQUIRED_ID.formatMessage("Employee Id"), MISSING_REQUIRED_ID));
-
-        String companyId = Optional.of(event)
-                .map(Event::getMessageBody)
-                .map(MessageBody::getReferences)
-                .map(map -> map.get("company_uuid"))
-                .map(UUID::toString)
-                .orElseThrow(() -> new BusinessException(MISSING_REQUIRED_ID.formatMessage("Company Id"), MISSING_REQUIRED_ID));
-
-        String bankAccountUUID = Optional.of(event)
-                .map(Event::getMessageBody)
-                .map(MessageBody::getEntityUUID)
-                .map(UUID::toString)
-                .orElseThrow(() -> new BusinessException(MISSING_REQUIRED_ID.formatMessage("Bank Account Id"), MISSING_REQUIRED_ID));
-
-        // Put values into context
-        context.put(MESSAGE_ID, messageId);
-        context.put(SRC_PAYEE_ID, employeeId);
-        context.put(COMPANY_UUID, companyId);
-        context.put(BANK_ACCOUNT_UUID, bankAccountUUID);
-        context.put(PAYEE_TYPE, PayeeType.INDIVIDUAL_CONTRACTOR.name());
-
-        // Set MDC for traceability across all downstream logs
-        MDC.put("eventId", event.getMessageBody().getEventId());
+        // Set MDC for logging traceability
+        MDC.put("eventId", eventId);
         MDC.put("messageId", messageId);
-        MDC.put("stepName", "ReadIncomingContractorBankAccountEvent");
+        MDC.put("stepName", "FetchPayeeBankAccountInformationFromGusto");
 
-        log.info("[STEP] Initialized context for contractor bank account event: eventId={}, messageId={}, employeeId={}, companyId={}, bankAccountUUID={}",
-                event.getMessageBody().getEventId(), messageId, employeeId, companyId, bankAccountUUID);
+        log.info("[STEP] Fetching Gusto payment configuration for companyId={}, payeeId={}, bankAccountUUID={}, payeeType={}",
+                companyId, payeeId, bankAccountUUID, payeeType);
+
+        var enrollmentOpt = companyEnrollmentRepository.findEntpPrtyIdBySrcCoId(companyId);
+        if (enrollmentOpt.isEmpty()) {
+            throw new ProcessorException(ErrorCode.ENROLLMENT_INCOMPLETE.getCode(),
+                    ErrorCode.ENROLLMENT_INCOMPLETE.formatMessage(companyId));
+        }
+
+        Optional<PayeeEntity> payeeOpt = payeeRepository.findBySrcPayeeId(payeeId);
+        if (payeeOpt.isEmpty()) {
+            throw new ProcessorException(ErrorCode.PAYEE_NOT_FOUND.getCode(),
+                    ErrorCode.PAYEE_NOT_FOUND.formatMessage(payeeId));
+        }
+
+        PayeeEntity payee = payeeOpt.get();
+        if (!Objects.equals(PayeeStatus.ACTIVE.getCode(), payee.getPayeeStsCd())) {
+            throw new ProcessorException(ErrorCode.PAYEE_ONBOARDING_INCOMPLETE.getCode(),
+                    ErrorCode.PAYEE_ONBOARDING_INCOMPLETE.formatMessage(payeeId));
+        }
+
+        if (payeeType.equalsIgnoreCase(PayeeType.EMPLOYEE.getName())) {
+            var config = paymentConfigurationService.getPaymentConfigurationsForAnEmployee(enrollmentOpt.get(), payeeId);
+            context.put(GUSTO_PAYEE_PAYMENT_CONFIGURATION, config);
+            log.info("[STEP] Employee payment configuration successfully retrieved from Gusto for payeeId={}", payeeId);
+        } else {
+            var config = paymentConfigurationService.getPaymentConfigurationsForAContractor(enrollmentOpt.get(), payeeId);
+            context.put(GUSTO_PAYEE_PAYMENT_CONFIGURATION, config);
+            log.info("[STEP] Contractor payment configuration successfully retrieved from Gusto for payeeId={}", payeeId);
+        }
     }
 }
