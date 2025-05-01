@@ -1,118 +1,161 @@
 package net.jpmchase.payroll.processor.steps.payee;
 
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-import net.jpmchase.payroll.processor.constants.ContextKeys;
-import net.jpmchase.payroll.processor.entity.ContractorPaymentEntity;
-import net.jpmchase.payroll.processor.entity.ContractorPaymentGroupEntity;
-import net.jpmchase.payroll.processor.entity.PayeeEntity;
+import net.jpmchase.payroll.processor.entity.*;
 import net.jpmchase.payroll.processor.enums.PayrollStatus;
 import net.jpmchase.payroll.processor.model.WorkflowContext;
-import net.jpmchase.payroll.processor.repository.ContractorPaymentGroupRepository;
-import net.jpmchase.payroll.processor.repository.ContractorPaymentRepository;
-import net.jpmchase.payroll.processor.repository.PayeeAccountRepository;
-import net.jpmchase.payroll.processor.repository.PayeeRepository;
-import net.jpmchase.payroll.processor.step.Step;
-import org.slf4j.MDC;
-import org.springframework.stereotype.Component;
+import net.jpmchase.payroll.processor.repository.*;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.*;
 
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 import static net.jpmchase.payroll.processor.constants.ContextKeys.*;
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
 
-@Slf4j
-@Component("DeterminePayrollInProgressForAContractor")
-@RequiredArgsConstructor
-public class PayrollInProgressForContractorDeterminationStep implements Step {
+class PayrollInProgressForContractorDeterminationStepTest {
 
-    private final ContractorPaymentGroupRepository contractorPaymentGroupRepository;
-    private final ContractorPaymentRepository contractorPaymentRepository;
-    private final PayeeRepository payeeRepository;
+    @InjectMocks
+    private PayrollInProgressForContractorDeterminationStep step;
 
-    @Override
-    public void execute(WorkflowContext context) {
-        String payeeId = context.get(SRC_PAYEE_ID, String.class);
-        String eventId = context.get(EVENT_ID, String.class);
-        String messageId = context.get(MESSAGE_ID, String.class);
-        String stepName = "DeterminePayrollInProgressForAContractor";
+    @Mock private ContractorPaymentGroupRepository contractorPaymentGroupRepository;
+    @Mock private ContractorPaymentRepository contractorPaymentRepository;
+    @Mock private PayeeRepository payeeRepository;
 
-        MDC.put("eventId", eventId);
-        MDC.put("messageId", messageId);
-        MDC.put("stepName", stepName);
+    @Captor private ArgumentCaptor<Boolean> payrollFlagCaptor;
 
-        log.info("[STEP] Checking if payroll is in progress for contractor payeeId={}", payeeId);
+    private final String payeeId = "payee123";
+    private final UUID pyrlEnrlId = UUID.randomUUID();
+    private final String groupId = "grp-456";
+    private final String eventId = "event-xyz";
+    private final String messageId = "msg-abc";
 
-        Optional<PayeeEntity> payeeOpt = validateAndLoadPayee(payeeId);
-        if (payeeOpt.isEmpty()) {
-            setPayrollInProgressToContext(context, false);
-            return;
-        }
+    private WorkflowContext context;
 
-        PayeeEntity payee = payeeOpt.get();
-        UUID pyrlEnrlId = payee.getPyrlEnrlId();
-        if (pyrlEnrlId == null) {
-            log.info("[STEP] No payroll enrollment ID found for payeeId={}. Skipping.", payeeId);
-            setPayrollInProgressToContext(context, false);
-            return;
-        }
-
-        AtomicBoolean inProgress = new AtomicBoolean(false);
-        List<String> excludedStatusCodes = List.of(
-                PayrollStatus.CANCELLED.getCode(),
-                PayrollStatus.REJECTED.getCode(),
-                PayrollStatus.PROCESSED.getCode()
-        );
-
-        List<ContractorPaymentGroupEntity> groupList =
-                contractorPaymentGroupRepository.findByEnrollmentIdAndCPStatusCode(pyrlEnrlId, excludedStatusCodes);
-
-        for (ContractorPaymentGroupEntity group : groupList) {
-            boolean found = checkPayrollInProgressForPayee(payeeId, group);
-            if (found) {
-                inProgress.set(true);
-                break;
-            }
-        }
-
-        setPayrollInProgressToContext(context, inProgress.get());
-        if (inProgress.get()) {
-            log.info("[STEP] Payroll is currently in progress for payeeId={}. Aborting downstream steps.", payeeId);
-        } else {
-            log.info("[STEP] No active payroll found for payeeId={}. Continuing processing.", payeeId);
-        }
+    @BeforeEach
+    void setup() {
+        MockitoAnnotations.openMocks(this);
+        step = new PayrollInProgressForContractorDeterminationStep(contractorPaymentGroupRepository, payeeRepository, contractorPaymentRepository);
+        context = new WorkflowContext();
+        context.put(SRC_PAYEE_ID, payeeId);
+        context.put(EVENT_ID, eventId);
+        context.put(MESSAGE_ID, messageId);
     }
 
-    private Optional<PayeeEntity> validateAndLoadPayee(String payeeId) {
-        Optional<PayeeEntity> payeeOpt = payeeRepository.findById(payeeId);
-        if (payeeOpt.isEmpty()) {
-            log.info("[STEP] No PayeeEntity found for payeeId={}. Treating as valid and skipping.", payeeId);
-        }
-        return payeeOpt;
+    @Test
+    void test_payeeNotFound_setsInProgressFalse() {
+        when(payeeRepository.findById(payeeId)).thenReturn(Optional.empty());
+
+        step.execute(context);
+
+        assertFalse(context.get(PAYROLL_IN_PROGRESS, Boolean.class));
+        verify(contractorPaymentGroupRepository, never()).findByEnrollmentIdAndCPStatusCode(any(), any());
     }
 
-    private boolean checkPayrollInProgressForPayee(String payeeId, ContractorPaymentGroupEntity groupEntity) {
-        String groupId = groupEntity.getId().getSrcCntrPymtGpId();
-        List<ContractorPaymentEntity> payments = contractorPaymentRepository.findBySrcCntrPymtGpId(groupId);
+    @Test
+    void test_nullPayrollEnrollment_setsInProgressFalse() {
+        PayeeEntity payee = new PayeeEntity();
+        payee.setPayeeId(payeeId);
+        payee.setPyrlEnrlId(null);
 
-        if (payments == null || payments.isEmpty()) {
-            log.info("[STEP] No contractor payments found under groupId={} for payeeId={}.", groupId, payeeId);
-            return false;
-        }
+        when(payeeRepository.findById(payeeId)).thenReturn(Optional.of(payee));
 
-        for (ContractorPaymentEntity payment : payments) {
-            if (payeeId.equals(payment.getPayeeId())) {
-                log.info("[STEP] Payroll match found in groupId={} for payeeId={}.", groupId, payeeId);
-                return true;
-            }
-        }
+        step.execute(context);
 
-        return false;
+        assertFalse(context.get(PAYROLL_IN_PROGRESS, Boolean.class));
+        verify(contractorPaymentGroupRepository, never()).findByEnrollmentIdAndCPStatusCode(any(), any());
     }
 
-    private void setPayrollInProgressToContext(WorkflowContext context, boolean value) {
-        context.put(ContextKeys.PAYROLL_IN_PROGRESS, value);
+    @Test
+    void test_noPaymentGroups_setsInProgressFalse() {
+        PayeeEntity payee = new PayeeEntity();
+        payee.setPayeeId(payeeId);
+        payee.setPyrlEnrlId(pyrlEnrlId);
+
+        when(payeeRepository.findById(payeeId)).thenReturn(Optional.of(payee));
+        when(contractorPaymentGroupRepository.findByEnrollmentIdAndCPStatusCode(eq(pyrlEnrlId), anyList()))
+                .thenReturn(List.of());
+
+        step.execute(context);
+
+        assertFalse(context.get(PAYROLL_IN_PROGRESS, Boolean.class));
+        verify(contractorPaymentRepository, never()).findBySrcCntrPymtGrpId(any());
+    }
+
+    @Test
+    void test_noPaymentsInGroup_setsInProgressFalse() {
+        PayeeEntity payee = new PayeeEntity();
+        payee.setPayeeId(payeeId);
+        payee.setPyrlEnrlId(pyrlEnrlId);
+
+        ContractorPaymentGroupEntity group = new ContractorPaymentGroupEntity();
+        group.setId(new ContractorPaymentGroupEntityId());
+        group.getId().setSrcCntrPymtGpId(groupId);
+
+        when(payeeRepository.findById(payeeId)).thenReturn(Optional.of(payee));
+        when(contractorPaymentGroupRepository.findByEnrollmentIdAndCPStatusCode(eq(pyrlEnrlId), anyList()))
+                .thenReturn(List.of(group));
+        when(contractorPaymentRepository.findBySrcCntrPymtGpId(groupId)).thenReturn(List.of());
+
+        step.execute(context);
+
+        assertFalse(context.get(PAYROLL_IN_PROGRESS, Boolean.class));
+    }
+
+    @Test
+    void test_payeeMatchInPayments_setsInProgressTrue() {
+        PayeeEntity payee = new PayeeEntity();
+        payee.setPayeeId(payeeId);
+        payee.setPyrlEnrlId(pyrlEnrlId);
+
+        ContractorPaymentGroupEntity group = new ContractorPaymentGroupEntity();
+        group.setId(new ContractorPaymentGroupEntityId());
+        group.getId().setSrcCntrPymtGpId(groupId);
+
+        ContractorPaymentEntity payment = new ContractorPaymentEntity();
+        payment.setPayeeId(payeeId);
+
+        when(payeeRepository.findById(payeeId)).thenReturn(Optional.of(payee));
+        when(contractorPaymentGroupRepository.findByEnrollmentIdAndCPStatusCode(eq(pyrlEnrlId), anyList()))
+                .thenReturn(List.of(group));
+        when(contractorPaymentRepository.findBySrcCntrPymtGpId(groupId)).thenReturn(List.of(payment));
+
+        step.execute(context);
+
+        assertTrue(context.get(PAYROLL_IN_PROGRESS, Boolean.class));
+    }
+
+    @Test
+    void test_multipleGroups_withOneMatch_setsInProgressTrue() {
+        PayeeEntity payee = new PayeeEntity();
+        payee.setPayeeId(payeeId);
+        payee.setPyrlEnrlId(pyrlEnrlId);
+
+        ContractorPaymentGroupEntity group1 = new ContractorPaymentGroupEntity();
+        group1.setId(new ContractorPaymentGroupEntityId());
+        group1.getId().setSrcCntrPymtGpId("group1");
+
+        ContractorPaymentGroupEntity group2 = new ContractorPaymentGroupEntity();
+        group2.setId(new ContractorPaymentGroupEntityId());
+        group2.getId().setSrcCntrPymtGpId("group2");
+
+        ContractorPaymentEntity nonMatch = new ContractorPaymentEntity();
+        nonMatch.setPayeeId("someone_else");
+
+        ContractorPaymentEntity match = new ContractorPaymentEntity();
+        match.setPayeeId(payeeId);
+
+        when(payeeRepository.findById(payeeId)).thenReturn(Optional.of(payee));
+        when(contractorPaymentGroupRepository.findByEnrollmentIdAndCPStatusCode(eq(pyrlEnrlId), anyList()))
+                .thenReturn(List.of(group1, group2));
+        when(contractorPaymentRepository.findBySrcCntrPymtGpId("group1")).thenReturn(List.of(nonMatch));
+        when(contractorPaymentRepository.findBySrcCntrPymtGpId("group2")).thenReturn(List.of(match));
+
+        step.execute(context);
+
+        assertTrue(context.get(PAYROLL_IN_PROGRESS, Boolean.class));
     }
 }
