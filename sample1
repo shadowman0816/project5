@@ -1,1 +1,123 @@
-lets 
+package net.jpmchase.payroll.processor.service;
+
+import lombok.extern.slf4j.Slf4j;
+import net.jpmchase.payroll.processor.model.*;
+import net.jpmchase.payroll.processor.registry.*;
+import net.jpmchase.payroll.processor.utils.*;
+import net.jpmchase.payroll.processor.exception.*;
+import org.slf4j.MDC;
+import org.springframework.stereotype.Service;
+
+import java.util.Optional;
+
+@Slf4j
+@Service
+public class EventProcessorService {
+
+    private final StepRegistry stepRegistry;
+    private final ConditionRegistry conditionRegistry;
+    private final RetryScheduleService retryScheduleService;
+
+    public EventProcessorService(StepRegistry stepRegistry, ConditionRegistry conditionRegistry,
+                                 RetryScheduleService retryScheduleService) {
+        this.stepRegistry = stepRegistry;
+        this.conditionRegistry = conditionRegistry;
+        this.retryScheduleService = retryScheduleService;
+    }
+
+    public void processEvent(Event event) {
+        String eventId = event.getMessageBody().getEventId();
+        MDC.put("eventId", eventId);  // Start MDC context
+        log.info("[PROCESSOR] Starting processing of event: {}", eventId);
+
+        WorkflowContext context = new WorkflowContext();
+        context.setEvent(event);
+
+        try {
+            for (StepConfig stepConfig : getStepsForEvent(event)) {
+                executeStepWithRetry(stepConfig, context, 0);
+            }
+            context.setStatus(WorkflowContext.Status.COMPLETED);
+            log.info("[PROCESSOR] Event processing completed for event: {}", eventId);
+        } catch (Exception e) {
+            context.setStatus(WorkflowContext.Status.FAILED);
+            log.error("[PROCESSOR] Event processing failed for event: {} - Reason: {}", eventId, e.getMessage(), e);
+            throw e;
+        } finally {
+            MDC.clear();  // Always clean up to avoid leaking MDC between threads
+        }
+    }
+
+    private void executeStepWithRetry(StepConfig stepConfig, WorkflowContext context, int retryCount) {
+        String stepName = stepConfig.getName();
+        log.info("[PROCESSOR] Executing step '{}' (Attempt {}/{})", stepName, retryCount + 1, stepConfig.getImmediateRetryCount());
+
+        Step stepExecutor = stepRegistry.get(stepName);
+        if (stepExecutor == null) {
+            log.warn("[PROCESSOR] Step '{}' not found in registry. Skipping.", stepName);
+            return;
+        }
+
+        if (!shouldExecute(stepConfig, context)) {
+            log.info("[PROCESSOR] Skipping step '{}' due to failed condition evaluation.", stepName);
+            return;
+        }
+
+        if (stepConfig.isDisableRetry()) {
+            try {
+                stepExecutor.execute(context);
+                context.setStatus(WorkflowContext.Status.SUCCESS);
+                log.info("[PROCESSOR] Step '{}' executed successfully (No retries).", stepName);
+            } catch (Exception e) {
+                context.setStatus(WorkflowContext.Status.FAILED);
+                log.error("[PROCESSOR] Step '{}' failed (No retries). Error: {}", stepName, e.getMessage(), e);
+                throw e;
+            }
+            return;
+        }
+
+        String failureReason = "";
+        while (retryCount < stepConfig.getImmediateRetryCount()) {
+            try {
+                stepExecutor.execute(context);
+                context.setStatus(WorkflowContext.Status.SUCCESS);
+                log.info("[PROCESSOR] Step '{}' executed successfully on attempt {}/{}", stepName, retryCount + 1, stepConfig.getImmediateRetryCount());
+                return;
+            } catch (Exception e) {
+                retryCount++;
+                failureReason = e.getMessage();
+                log.warn("[PROCESSOR] Step '{}' failed on attempt {}/{}. Retrying... Reason: {}", stepName, retryCount, stepConfig.getImmediateRetryCount(), failureReason);
+            }
+        }
+
+        log.error("[PROCESSOR] Step '{}' failed after {} attempts. Scheduling backoff retry.", stepName, stepConfig.getImmediateRetryCount());
+        context.setStatus(WorkflowContext.Status.FAILED);
+        retryScheduleService.scheduleRetry(stepConfig, context, failureReason);
+    }
+
+    private boolean shouldExecute(StepConfig stepConfig, WorkflowContext context) {
+        String conditionName = stepConfig.getExecuteOnCondition();
+        if (conditionName == null || "always".equalsIgnoreCase(conditionName)) {
+            return true;
+        }
+
+        try {
+            ExecutionCondition condition = conditionRegistry.get(conditionName);
+            if (condition == null) {
+                log.warn("[PROCESSOR] No condition bean found for '{}'. Skipping execution.", conditionName);
+                return false;
+            }
+            return condition.evaluate(context);
+        } catch (Exception e) {
+            log.error("[PROCESSOR] Failed to evaluate condition '{}'. Error: {}", conditionName, e.getMessage(), e);
+            return false;
+        }
+    }
+
+    private Iterable<StepConfig> getStepsForEvent(Event event) {
+        // This method should retrieve step configurations from metadata/yaml registry
+        return WorkflowRegistry.getWorkflowSteps(event.getEventType());
+    }
+}
+
+
