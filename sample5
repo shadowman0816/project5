@@ -1,0 +1,30 @@
+@Service
+@RequiredArgsConstructor
+@Loggable
+public class StorePayrollService {
+
+    private final PayrollMapper payrollMapper;
+    private final PayrollTransactionMapper payrollTransactionMapper;
+    private final EmployeeTransactionMapper employeeTransactionMapper;
+
+    private final PayrollPersistenceService payrollPersistenceService;
+    private final PayrollTransactionPersistenceService payrollTransactionPersistenceService;
+    private final EmployeeTransactionPersistenceService employeeTransactionPersistenceService;
+
+    public void storePayroll(GetPayrollResponse response) {
+        // 1. Payroll Entity
+        PayrollEntity payrollEntity = payrollMapper.toEntity(response);
+        payrollEntity.setPrylTxnStsCd(PayrollStatus.PROCESSED.getCode());
+        payrollEntity.setUpdtUsrId(AppConstants.SYSTEM_USER);
+        payrollEntity.setUpdtTs(Timestamp.from(Instant.now()));
+        payrollPersistenceService.saveWithAudit(payrollEntity);
+
+        // 2. Payroll Transaction Entities (Gross/Net Payment, Taxes, Garnishments)
+        List<PayrollTransactionEntity> transactionEntities = payrollTransactionMapper.toEntities(response, payrollEntity);
+        payrollTransactionPersistenceService.saveAllWithAudit(transactionEntities);
+
+        // 3. Employee Transaction Entities
+        List<EmployeeTransactionEntity> employeeTransactions = employeeTransactionMapper.toEntities(response.getEmployeeCompensations(), payrollEntity);
+        employeeTransactionPersistenceService.saveAllWithAudit(employeeTransactions);
+    }
+}
