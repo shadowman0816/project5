@@ -75,3 +75,166 @@ workflow:
             immediateRetryCount: 1
             backoffRetry:
               enabled: false
+
+@Component("ReadIncomingPayrollProcessedEventStep")
+@RequiredArgsConstructor
+@Slf4j
+public class ReadIncomingPayrollProcessedEventStep implements Step {
+
+    @Override
+    public void execute(WorkflowContext context) {
+        Event event = context.get("event", Event.class);
+
+        String messageId = Optional.ofNullable(event.getMessageId())
+                .orElseThrow(() -> new BusinessException(MISSING_REQUIRED_ID.formatMessage("Message Id"), MISSING_REQUIRED_ID.getCode()));
+
+        Map<String, Object> body = Optional.ofNullable(event.getBody())
+                .orElseThrow(() -> new BusinessException(MISSING_REQUIRED_ID.formatMessage("Event Body"), MISSING_REQUIRED_ID.getCode()));
+
+        String payrollId = Optional.ofNullable(body.get("entity_uuid"))
+                .map(Object::toString)
+                .orElseThrow(() -> new BusinessException(MISSING_REQUIRED_ID.formatMessage("Payroll Id"), MISSING_REQUIRED_ID.getCode()));
+
+        String companyId = Optional.ofNullable(body.get("resource_uuid"))
+                .map(Object::toString)
+                .orElseThrow(() -> new BusinessException(MISSING_REQUIRED_ID.formatMessage("Company Id"), MISSING_REQUIRED_ID.getCode()));
+
+        context.put(PAYROLL_ID, payrollId);
+        context.put(COMPANY_UUID, companyId);
+        context.put(MESSAGE_ID, messageId);
+        context.put(PAYEE_TYPE, PayeeType.EMPLOYEE.name()); // Assume EMPLOYEE here unless differentiated later
+
+        log.info("[STEP] ReadIncomingPayrollProcessedEventStep populated context with payrollId={}, companyId={}, messageId={}", payrollId, companyId, messageId);
+    }
+}
+
+@Component("ValidatePayrollStatusFromGusto")
+@RequiredArgsConstructor
+@Slf4j
+public class ValidatePayrollStatusFromGustoStep implements Step {
+
+    private final PayrollService payrollService;
+
+    @Override
+    public void execute(WorkflowContext context) {
+        String payrollId = context.get(PAYROLL_UUID, String.class);
+        String companyId = context.get(COMPANY_UUID, String.class);
+
+        log.info("[STEP] Validating payroll status from Gusto for companyId={}, payrollId={}", companyId, payrollId);
+
+        GetPayrollResponse payrollResponse = payrollService.getSinglePayroll(companyId, payrollId);
+
+        if (payrollResponse == null || !"processed".equalsIgnoreCase(payrollResponse.getStatus())) {
+            log.info("[STEP] Payroll status is not 'processed' for payrollId={}. Skipping processing.", payrollId);
+            throw new ProcessorException(ErrorCode.INVALID_PAYROLL_STATUS.getCode(),
+                    ErrorCode.INVALID_PAYROLL_STATUS.formatMessage(payrollId));
+        }
+
+        log.info("[STEP] Payroll status is 'processed' for payrollId={}. Proceeding.", payrollId);
+    }
+}
+package net.jpmchase.payroll.processor.steps.payroll;
+
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import net.jpmchase.payroll.processor.exception.ProcessorException;
+import net.jpmchase.payroll.processor.metadata.WorkflowContext;
+import net.jpmchase.payroll.processor.service.CompanyEnrollmentService;
+import net.jpmchase.payroll.processor.steps.Step;
+import org.springframework.stereotype.Component;
+
+import static net.jpmchase.payroll.processor.steps.utils.WorkflowContextUtil.*;
+
+@Slf4j
+@Component("DetermineCompanyEnrollment")
+@RequiredArgsConstructor
+public class CompanyEnrollmentDeterminationStep implements Step {
+
+    private final CompanyEnrollmentService companyEnrollmentService;
+
+    @Override
+    public void execute(WorkflowContext context) {
+        String companyId = context.get(COMPANY_UUID, String.class);
+        String payeeType = context.get(PAYEE_TYPE, String.class);
+
+        log.info("[STEP] Checking enrollment status for companyId={} and payeeType={}", companyId, payeeType);
+
+        boolean isEnrolled = companyEnrollmentService.isCompanyEnrolled(companyId, payeeType);
+
+        if (!isEnrolled) {
+            log.warn("[STEP] Company enrollment not complete for companyId={} and payeeType={}", companyId, payeeType);
+            throw new ProcessorException("ENROLLMENT_INCOMPLETE",
+                    String.format("Company enrollment not complete for companyId=%s and payeeType=%s", companyId, payeeType));
+        }
+
+        log.info("[STEP] Company is enrolled for companyId={} and payeeType={}", companyId, payeeType);
+    }
+}
+package net.jpmchase.payroll.processor.service.eligibility;
+
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import net.jpmchase.payroll.processor.exception.ProcessorException;
+import net.jpmchase.payroll.product.model.enums.EnrollmentStatus;
+import net.jpmchase.payroll.product.repository.EnrollmentRepository;
+import net.jpmchase.payroll.product.service.LimitUtilityService;
+import net.jpmchase.payroll.product.service.ProfileEligibilityService;
+import net.jpmchase.payroll.product.model.PartyAccount;
+import net.jpmchase.payroll.product.model.EnrollmentEntity;
+import net.jpmchase.payroll.product.model.eligibility.PaymentCustomerEligibilityResponse;
+import net.jpmchase.payroll.product.service.response.CustomerEligibilityStatus;
+
+import org.springframework.stereotype.Service;
+
+import java.util.Optional;
+import java.util.UUID;
+
+@Slf4j
+@Service
+@RequiredArgsConstructor
+public class CustomerInternalEligibilityService {
+
+    private final ProfileEligibilityService profileEligibilityService;
+    private final LimitUtilityService limitUtilityService;
+    private final EnrollmentRepository enrollmentRepository;
+
+    public CustomerEligibilityStatus validateCustomer(UUID companyId, Long profileId) {
+        log.info("[STEP] Validating internal eligibility for companyId={}, profileId={}", companyId, profileId);
+
+        // 1. Product + Account Eligibility
+        PaymentCustomerEligibilityResponse eligibilityResponse =
+            profileEligibilityService.checkProductEligibility(profileId, companyId.toString());
+
+        // 2. Enrollment Status
+        EnrollmentEntity enrollment = enrollmentRepository
+            .findByRelEntPrtyId(companyId.toString())
+            .orElseThrow(() -> new ProcessorException("ENROLLMENT_NOT_FOUND", "Company enrollment not found"));
+
+        if (!EnrollmentStatus.COMPLETE.getCode().equals(enrollment.getEnrlStsCd())) {
+            throw new ProcessorException("ENROLLMENT_INCOMPLETE", "Enrollment is not complete for company: " + companyId);
+        }
+
+        // 3. Funding Account Check
+        Optional<PartyAccount> fundingAccountOpt = eligibilityResponse
+            .getPartyAccounts()
+            .getEligible()
+            .stream()
+            .filter(acct -> acct.getDigitalAccountIdentifier().equals(enrollment.getAcctNb()))
+            .findFirst();
+
+        if (fundingAccountOpt.isEmpty()) {
+            throw new ProcessorException("FUNDING_ACCOUNT_MISSING", "No valid funding account for company: " + companyId);
+        }
+
+        // 4. Daily Limit Check
+        Double dailyLimit = limitUtilityService.getSegmentOrProfileLimit("PAYROLL_PRODUCT_NAME");
+
+        return CustomerEligibilityStatus.builder()
+            .eligible(true)
+            .dailyLimit(dailyLimit)
+            .fundingAccountIdentifier(fundingAccountOpt.get().getDigitalAccountIdentifier())
+            .build();
+    }
+}
+
+
