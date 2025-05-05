@@ -1,0 +1,77 @@
+workflow:
+  groups:
+    Payroll:
+      "payroll.processed":
+        name: ProcessPayroll
+        steps:
+          - name: ReadIncomingPayrollProcessedEvent
+            description: Parses incoming event and populates context with payrollId, employeeIds, etc.
+            disableRetry: false
+            cancellable: false
+            immediateRetryCount: 2
+            backoffRetry:
+              enabled: true
+              maxBackOffHours: 3
+              cutoffTime: "19:00"
+
+          - name: ValidatePayrollStatusFromGusto
+            description: Checks Gusto to confirm the payroll is in 'processed' state
+            executeOnCondition: AlwaysExecute
+            disableRetry: false
+            cancellable: true
+            immediateRetryCount: 2
+            backoffRetry:
+              enabled: true
+              maxBackOffHours: 3
+              cutoffTime: "19:00"
+
+          - name: ValidateCompanyPayrollEnrollment
+            description: Confirms the company is properly enrolled in payroll
+            executeOnCondition: ProceedIfNotSkipped
+            disableRetry: false
+            cancellable: false
+            immediateRetryCount: 2
+            backoffRetry:
+              enabled: true
+              maxBackOffHours: 3
+              cutoffTime: "19:00"
+
+          - name: ValidateCustomerInternalEligibility
+            description: Validates funding account status, daily limit, and overall eligibility using PCP+
+            executeOnCondition: ProceedIfNotSkipped
+            disableRetry: false
+            cancellable: false
+            immediateRetryCount: 2
+            backoffRetry:
+              enabled: true
+              maxBackOffHours: 3
+              cutoffTime: "19:00"
+
+          - name: ValidatePayrollProcessingWindow
+            description: Checks if today is a valid processing day, cutoff time not breached, and payroll record exists
+            executeOnCondition: ProceedIfNotSkipped
+            disableRetry: false
+            cancellable: false
+            immediateRetryCount: 1
+            backoffRetry:
+              enabled: true
+              maxBackOffHours: 2
+              cutoffTime: "06:45"
+
+          - name: ReconcileAndMergeEmployeePaymentConfigurations
+            description: Merges employee payment data from consolidated and single payroll Gusto APIs using single payroll as source of truth
+            executeOnCondition: ProceedIfNotSkipped
+            disableRetry: false
+            cancellable: false
+            immediateRetryCount: 1
+            backoffRetry:
+              enabled: false
+
+          - name: PersistPayrollHierarchyToDatabase
+            description: Stores payroll, transaction, and payee-level split data including garnishments and check details
+            executeOnCondition: ProceedIfNotSkipped
+            disableRetry: false
+            cancellable: false
+            immediateRetryCount: 1
+            backoffRetry:
+              enabled: false
