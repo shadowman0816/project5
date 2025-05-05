@@ -54,3 +54,76 @@ public class ValidatePayrollProcessingWindowStep implements Step {
         log.info("[STEP] Processing window validated successfully for payrollId={}", payrollId);
     }
 }
+package net.jpmchase.payroll.processor.util;
+
+import java.time.DayOfWeek;
+import java.time.LocalDate;
+
+public class DateTimeUtil {
+
+    public static boolean isWeekend(LocalDate date) {
+        return date.getDayOfWeek() == DayOfWeek.SATURDAY ||
+               date.getDayOfWeek() == DayOfWeek.SUNDAY;
+    }
+}@Repository
+public interface HolidayRepository extends JpaRepository<HolidayEntity, LocalDate> {
+    boolean existsByHolidayDate(LocalDate holidayDate);
+}
+@Service
+@RequiredArgsConstructor
+public class HolidayService {
+
+    private final HolidayRepository holidayRepository;
+
+    public boolean isHoliday(LocalDate date) {
+        return holidayRepository.existsByHolidayDate(date);
+    }
+
+    public LocalDate getNextBusinessDay(LocalDate date) {
+        LocalDate next = date;
+        while (isHoliday(next) || next.getDayOfWeek() == DayOfWeek.SATURDAY || next.getDayOfWeek() == DayOfWeek.SUNDAY) {
+            next = next.plusDays(1);
+        }
+        return next;
+    }
+}@Component
+@RequiredArgsConstructor
+@Slf4j
+public class ValidatePayrollProcessingWindowStep implements Step {
+
+    @Value("${payroll.cutoff.hour}")
+    private int cutoffHour;
+
+    private final HolidayService holidayService;
+    private final PayrollRepository payrollRepository;
+
+    @Override
+    public void execute(WorkflowContext context) {
+        String srcPayrollId = context.get(SRC_PAYROLL_ID, String.class);
+        String timestampStr = context.get(TIMESTAMP, String.class);
+        GetPayrollResponse payrollResponse = context.get(GUSTO_SINGLE_PAYROLL, GetPayrollResponse.class);
+
+        ZonedDateTime receivedTime = Instant.ofEpochSecond(Long.parseLong(timestampStr)).atZone(ZoneId.systemDefault());
+        LocalTime eventTime = receivedTime.toLocalTime();
+
+        if (eventTime.getHour() >= cutoffHour) {
+            throw new ProcessorException(CUTOFF_TIME_BREACHED, "Webhook received after cutoff hour");
+        }
+
+        LocalDate procDate = payrollResponse.getProcDt();
+        if (holidayService.isHoliday(procDate) || isWeekend(procDate)) {
+            throw new ProcessorException(NOT_A_BUSINESS_DAY, "Processing date is not a valid business day");
+        }
+
+        boolean exists = payrollRepository.findBySrcPayrollId(srcPayrollId).isPresent();
+        if (!exists) {
+            throw new ProcessorException(PAYROLL_RECORD_NOT_FOUND, "Payroll record missing");
+        }
+
+        log.info("[STEP] Payroll processing window is valid for payrollId={}", srcPayrollId);
+    }
+
+    private boolean isWeekend(LocalDate date) {
+        return date.getDayOfWeek() == DayOfWeek.SATURDAY || date.getDayOfWeek() == DayOfWeek.SUNDAY;
+    }
+}
