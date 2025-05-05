@@ -96,5 +96,293 @@ public interface PayrollMapper {
     @Mapping(source = "processedDate", target = "procDt")
     PayrollEntity toEntity(GetPayrollResponse source);
 }
+package com.yourcompany.payroll.mapper;
+
+import com.yourcompany.payroll.entity.PayrollEntity;
+import com.yourcompany.payroll.remote.gusto.model.payroll.GetPayrollResponse;
+import org.mapstruct.*;
+import org.mapstruct.factory.Mappers;
+
+import java.sql.Timestamp;
+import java.time.Instant;
+
+@Mapper(componentModel = "spring")
+public interface PayrollEntityMapper {
+
+    PayrollEntityMapper INSTANCE = Mappers.getMapper(PayrollEntityMapper.class);
+
+    @Mapping(target = "pyrlStsCd", constant = "PROCESSED")
+    @Mapping(target = "errCd", ignore = true)
+    @Mapping(target = "errDescTx", ignore = true)
+    @Mapping(target = "updtUsrId", source = "updatedBy")
+    @Mapping(target = "updtTs", expression = "java(currentTimestamp())")
+    void updatePayrollEntity(@MappingTarget PayrollEntity entity, GetPayrollResponse response, String updatedBy);
+
+    default Timestamp currentTimestamp() {
+        return Timestamp.from(Instant.now());
+    }
+}
+package com.yourcompany.payroll.mapper;
+
+import com.yourcompany.payroll.entity.PayrollTransactionEntity;
+import com.yourcompany.payroll.entity.PayrollTransactionEntityId;
+import com.yourcompany.payroll.remote.gusto.model.payroll.EmployeeCompensations;
+import com.yourcompany.payroll.remote.gusto.model.payroll.GetPayrollResponse;
+import org.mapstruct.*;
+import org.mapstruct.factory.Mappers;
+
+import java.math.BigDecimal;
+import java.sql.Timestamp;
+import java.time.Instant;
+import java.util.*;
+import java.util.stream.Collectors;
+
+@Mapper(componentModel = "spring")
+public interface PayrollTransactionMapper {
+
+    PayrollTransactionMapper INSTANCE = Mappers.getMapper(PayrollTransactionMapper.class);
+
+    default List<PayrollTransactionEntity> mapAllFrom(GetPayrollResponse response, String srcPayrollId, String createdBy) {
+        List<PayrollTransactionEntity> transactions = new ArrayList<>();
+        Timestamp now = currentTimestamp();
+
+        for (EmployeeCompensations emp : response.getEmployeeCompensations()) {
+            String employeeId = emp.getEmployeeUuid();
+            String eventId = response.getEventId(); // from webhook context
+            Date procDate = response.getPayroll().getStartDate(); // or actual processing date
+
+            // 1. Employee Net Pay (CR)
+            transactions.add(createTransaction(
+                    buildTxnId("NETPAY", employeeId),
+                    procDate,
+                    srcPayrollId,
+                    "CR",
+                    "NETPAY",
+                    emp.getNetPay(),
+                    emp.getNetPay(),
+                    employeeId,
+                    eventId,
+                    createdBy,
+                    now
+            ));
+
+            // 2. Employee Taxes (DR)
+            if (emp.getEmployeeTaxes() != null) {
+                for (var tax : emp.getEmployeeTaxes()) {
+                    transactions.add(createTransaction(
+                            buildTxnId("TAX", employeeId + "-" + tax.getName()),
+                            procDate,
+                            srcPayrollId,
+                            "DR",
+                            "TAX",
+                            tax.getAmount(),
+                            tax.getAmount(),
+                            employeeId,
+                            eventId,
+                            createdBy,
+                            now
+                    ));
+                }
+            }
+
+            // 3. Garnishments (DR)
+            if (emp.getGarnishments() != null) {
+                for (var garnishment : emp.getGarnishments()) {
+                    transactions.add(createTransaction(
+                            buildTxnId("GARNISH", employeeId + "-" + garnishment.getName()),
+                            procDate,
+                            srcPayrollId,
+                            "DR",
+                            "GARNISHMENT",
+                            garnishment.getAmount(),
+                            garnishment.getAmount(),
+                            employeeId,
+                            eventId,
+                            createdBy,
+                            now
+                    ));
+                }
+            }
+
+            // 4. Employer Taxes (DR)
+            if (emp.getEmployerTaxes() != null) {
+                for (var employerTax : emp.getEmployerTaxes()) {
+                    transactions.add(createTransaction(
+                            buildTxnId("ER-TAX", employeeId + "-" + employerTax.getName()),
+                            procDate,
+                            srcPayrollId,
+                            "DR",
+                            "EMPLOYER_TAX",
+                            employerTax.getAmount(),
+                            employerTax.getAmount(),
+                            employeeId,
+                            eventId,
+                            createdBy,
+                            now
+                    ));
+                }
+            }
+        }
+
+        return transactions;
+    }
+
+    private static PayrollTransactionEntity createTransaction(
+            String txnIdSuffix,
+            Date procDate,
+            String srcPayrollId,
+            String crDr,
+            String type,
+            BigDecimal amount,
+            BigDecimal srcAmount,
+            String actorId,
+            String eventId,
+            String user,
+            Timestamp now
+    ) {
+        PayrollTransactionEntity txn = new PayrollTransactionEntity();
+
+        PayrollTransactionEntityId id = new PayrollTransactionEntityId();
+        id.setPyrlTxnId(UUID.nameUUIDFromBytes((srcPayrollId + "-" + txnIdSuffix).getBytes()).toString());
+        id.setProcDt(procDate);
+        id.setHistIn('N');
+
+        txn.setId(id);
+        txn.setSrcPyrlId(srcPayrollId);
+        txn.setCrDrCd(crDr);
+        txn.setTxnTypeNm(type);
+        txn.setTxnAm(amount);
+        txn.setSrcTxnAm(srcAmount);
+        txn.setActorEntpPrtyId(actorId);
+        txn.setSrcEvtId(eventId);
+        txn.setTxnsStsCd("PROCESSED");
+        txn.setCreUsrId(user);
+        txn.setUpdtUsrId(user);
+        txn.setCreTs(now);
+        txn.setUpdtTs(now);
+        return txn;
+    }
+
+    private static String buildTxnId(String prefix, String uniqueKey) {
+        return prefix + "-" + uniqueKey;
+    }
+
+    default Timestamp currentTimestamp() {
+        return Timestamp.from(Instant.now());
+    }
+}
+package com.yourcompany.payroll.mapper;
+
+import com.yourcompany.payroll.entity.EmployeeTransactionEntity;
+import com.yourcompany.payroll.entity.EmployeeTransactionId;
+import com.yourcompany.payroll.remote.gusto.model.payroll.EmployeeCompensations;
+import com.yourcompany.payroll.remote.gusto.model.payroll.GetPayrollResponse;
+import com.yourcompany.payroll.remote.gusto.model.payroll.PaymentDistribution; // assumed structure
+import org.mapstruct.*;
+import org.mapstruct.factory.Mappers;
+
+import java.math.BigDecimal;
+import java.sql.Timestamp;
+import java.time.Instant;
+import java.util.*;
+
+@Mapper(componentModel = "spring")
+public interface EmployeeTransactionMapper {
+
+    EmployeeTransactionMapper INSTANCE = Mappers.getMapper(EmployeeTransactionMapper.class);
+
+    default List<EmployeeTransactionEntity> mapAllFrom(GetPayrollResponse response, String srcPayrollId, String createdBy) {
+        List<EmployeeTransactionEntity> empTxns = new ArrayList<>();
+        Timestamp now = currentTimestamp();
+
+        for (EmployeeCompensations emp : response.getEmployeeCompensations()) {
+            String employeeId = emp.getEmployeeUuid();
+            String eventId = response.getEventId(); // from webhook
+            Date procDate = response.getPayroll().getStartDate(); // or actual processing date
+
+            List<PaymentDistribution> distributions = emp.getPaymentDistributions(); // assumed list of splits
+
+            if (distributions != null && !distributions.isEmpty()) {
+                for (PaymentDistribution dist : distributions) {
+                    empTxns.add(buildTransaction(
+                            procDate,
+                            srcPayrollId,
+                            employeeId,
+                            dist.getBankAccountUuid(),
+                            dist.getAmount(),
+                            dist.getPaymentMethod(),
+                            eventId,
+                            createdBy,
+                            now
+                    ));
+                }
+            } else {
+                // fallback to single netPay if no distributions
+                empTxns.add(buildTransaction(
+                        procDate,
+                        srcPayrollId,
+                        employeeId,
+                        emp.getBankAccountUuid(), // fallback to default
+                        emp.getNetPay(),
+                        emp.getPaymentMethod(),
+                        eventId,
+                        createdBy,
+                        now
+                ));
+            }
+        }
+
+        return empTxns;
+    }
+
+    private static EmployeeTransactionEntity buildTransaction(
+            Date procDate,
+            String payrollId,
+            String employeeId,
+            String accountId,
+            BigDecimal amount,
+            String method,
+            String eventId,
+            String user,
+            Timestamp now
+    ) {
+        EmployeeTransactionEntity entity = new EmployeeTransactionEntity();
+
+        EmployeeTransactionId id = new EmployeeTransactionId();
+        id.setPyrLEmpTxnId(UUID.nameUUIDFromBytes((employeeId + "-" + accountId).getBytes()).toString());
+        id.setProcDt(procDate);
+        id.setHistIn('N');
+
+        entity.setId(id);
+        entity.setSrcPayeeId(employeeId);
+        entity.setPyrLPayeeAcctId(accountId);
+        entity.setTxnAm(amount);
+        entity.setTxnModeCd(method);
+        entity.setPayeeNm("EMPLOYEE"); // fallback if not resolved
+        entity.setPayeeTxnStsCd("PROCESSED");
+
+        entity.setSrcEvtId(eventId);
+        entity.setSrcTxnAm(amount);
+        entity.setSrcPymtInstrDtlId(accountId);
+        entity.setClntRefNb(null);
+        entity.setErrCd(null);
+        entity.setErrDescTx(null);
+        entity.setCntprTxnId(null);
+        entity.setPymtGpId(null);
+        entity.setPyrLTxnId(payrollId);
+
+        entity.setCreUsrId(user);
+        entity.setUpdtUsrId(user);
+        entity.setCreTs(now);
+        entity.setUpdtTs(now);
+
+        return entity;
+    }
+
+    default Timestamp currentTimestamp() {
+        return Timestamp.from(Instant.now());
+    }
+}
+
 
 
