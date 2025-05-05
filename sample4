@@ -1,0 +1,199 @@
+package net.jpmchase.payroll.processor.repository.mgmt.holiday;
+
+import jakarta.persistence.*;
+import lombok.Getter;
+import lombok.Setter;
+import lombok.ToString;
+
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+
+@Entity
+@Table(name = "hldy_cal", schema = "pyrl_mgmt")
+@Getter
+@Setter
+@ToString
+public class HolidayEntity {
+
+    @Id
+    @Column(name = "hldy_cal_dt", nullable = false)
+    private LocalDate holidayDate;
+
+    @Column(name = "ctry_cd", nullable = false)
+    private String countryCode;
+
+    @Column(name = "hldy_desc_tx")
+    private String holidayDescription;
+
+    @Column(name = "src_updt_ts")
+    private LocalDateTime sourceUpdateTimestamp;
+
+    @Column(name = "cre_ts", nullable = false)
+    private LocalDateTime createdTimestamp;
+
+    @Column(name = "cre_usr_id", nullable = false)
+    private String createdUserId;
+
+    @Column(name = "updt_ts", nullable = false)
+    private LocalDateTime updatedTimestamp;
+
+    @Column(name = "updt_usr_id", nullable = false)
+    private String updatedUserId;
+}
+
+@Service
+@RequiredArgsConstructor
+public class ReconcileEmployeePaymentService {
+
+    private final PaymentConfigurationService paymentConfigurationService;
+
+    public void reconcile(EmployeeCompensations employeeComp,
+                          String enterprisePartyId,
+                          String companyId) {
+
+        String employeeId = employeeComp.getEmployeeUuid();
+        if (employeeId == null) {
+            throw new ProcessorException("Missing employee UUID in payroll compensation");
+        }
+
+        EmployeePaymentConfiguration config = paymentConfigurationService
+                .getPaymentConfigurationsForAnEmployee(enterprisePartyId, companyId, employeeId);
+
+        // 1. Compare payment method
+        if (!Objects.equals(employeeComp.getPaymentMethod().name(), config.getPaymentMethod())) {
+            logDiscrepancy("Payment method mismatch", employeeId,
+                employeeComp.getPaymentMethod().name(), config.getPaymentMethod());
+        }
+
+        // 2. Compare number of splits
+        List<Split> payrollSplits = Optional.ofNullable(employeeComp.getSplits()).orElse(Collections.emptyList());
+        List<Split> configSplits = Optional.ofNullable(config.getSplits()).orElse(Collections.emptyList());
+
+        if (payrollSplits.size() != configSplits.size()) {
+            logDiscrepancy("Split count mismatch", employeeId,
+                String.valueOf(payrollSplits.size()), String.valueOf(configSplits.size()));
+        }
+
+        // 3. Compare splits using bankAccountUUID and priority
+        Map<String, Split> configSplitMap = configSplits.stream()
+                .filter(s -> s.getBankAccountUUID() != null)
+                .collect(Collectors.toMap(Split::getBankAccountUUID, Function.identity(), (a, b) -> a));
+
+        payrollSplits.forEach(split -> {
+            Split match = configSplitMap.get(split.getBankAccountUUID());
+            if (match == null) {
+                logDiscrepancy("Missing split in config", employeeId, split.getBankAccountUUID(), null);
+                return;
+            }
+
+            if (!Objects.equals(split.getPriority(), match.getPriority())) {
+                logDiscrepancy("Priority mismatch for split " + split.getBankAccountUUID(),
+                    employeeId, String.valueOf(split.getPriority()), String.valueOf(match.getPriority()));
+            }
+
+            if (!Objects.equals(split.getSplitAmount(), match.getSplitAmount())) {
+                logDiscrepancy("Split amount mismatch for " + split.getBankAccountUUID(),
+                    employeeId, String.valueOf(split.getSplitAmount()), String.valueOf(match.getSplitAmount()));
+            }
+        });
+    }
+
+    private void logDiscrepancy(String message, String employeeId, String fromPayroll, String fromConfig) {
+        log.warn("Reconciliation warning for employee {}: {} | Payroll: [{}], Config: [{}]",
+                employeeId, message, fromPayroll, fromConfig);
+    }
+}
+
+public class ReconciliationDiff {
+
+    private final List<String> issues = new ArrayList<>();
+
+    public void add(String description, String expected, String actual) {
+        if (!Objects.equals(expected, actual)) {
+            issues.add(String.format("%s - Expected: [%s], Actual: [%s]", description, expected, actual));
+        }
+    }
+
+    public boolean hasIssues() {
+        return !issues.isEmpty();
+    }
+
+    public List<String> getIssues() {
+        return issues;
+    }
+
+    public void log(String employeeId) {
+        issues.forEach(issue -> log.warn("Reconciliation Issue for {}: {}", employeeId, issue));
+    }
+}
+@Service
+@RequiredArgsConstructor
+public class ReconcileEmployeePaymentInformationStep implements WorkflowStep {
+
+    private final ReconcileEmployeePaymentService reconcileService;
+
+    @Override
+    public void execute(WorkflowContext context) {
+        GetPayrollResponse payroll = context.get(GetPayrollResponse.class);
+        String enterpriseId = context.getEnterprisePartyId();
+        String companyId = payroll.getCompanyUuid();
+
+        payroll.getEmployeeCompensations().forEach(employeeComp ->
+                reconcileService.reconcile(employeeComp, enterpriseId, companyId)
+        );
+    }
+}
+@Component
+@RequiredArgsConstructor
+public class StorePayrollStep implements ProcessorStep {
+
+    private final StorePayrollService storePayrollService;
+
+    @Override
+    public void execute(EventContext context) {
+        PayrollPayload payload = context.get("payrollPayload", PayrollPayload.class);
+        storePayrollService.storePayroll(payload);
+    }
+}
+@Service
+@RequiredArgsConstructor
+public class StorePayrollService {
+
+    private final PayrollRepository payrollRepository;
+    private final PayrollAuditRepository payrollAuditRepository;
+    private final PayrollTransactionRepository payrollTxnRepository;
+    private final PayrollTransactionAuditRepository payrollTxnAuditRepository;
+    private final EmployeeTransactionRepository empTxnRepository;
+    private final EmployeeTransactionAuditRepository empTxnAuditRepository;
+
+    private final PayrollMapper payrollMapper;
+    private final PayrollTxnMapper payrollTxnMapper;
+    private final EmpTxnMapper empTxnMapper;
+
+    @Transactional
+    public void storePayroll(PayrollPayload payload) {
+        PayrollEntity payroll = payrollMapper.toEntity(payload);
+        payrollRepository.save(payroll);
+
+        PayrollAuditEntity payrollAudit = payrollMapper.toAuditEntity(payload);
+        payrollAuditRepository.save(payrollAudit);
+
+        for (PayrollTransactionPayload txn : payload.getTransactions()) {
+            PayrollTransactionEntity txnEntity = payrollTxnMapper.toEntity(txn);
+            payrollTxnRepository.save(txnEntity);
+
+            PayrollTransactionAuditEntity txnAudit = payrollTxnMapper.toAuditEntity(txn);
+            payrollTxnAuditRepository.save(txnAudit);
+        }
+
+        for (EmployeeTransactionPayload empTxn : payload.getEmployeeTransactions()) {
+            EmployeeTransactionEntity empTxnEntity = empTxnMapper.toEntity(empTxn);
+            empTxnRepository.save(empTxnEntity);
+
+            EmployeeTransactionAuditEntity empTxnAudit = empTxnMapper.toAuditEntity(empTxn);
+            empTxnAuditRepository.save(empTxnAudit);
+        }
+    }
+}
+
+
