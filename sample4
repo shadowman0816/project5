@@ -195,5 +195,27 @@ public class StorePayrollService {
         }
     }
 }
+@Mapper(componentModel = "spring")
+public interface PayrollMapper {
+
+    PayrollEntity toEntity(PayrollPayload source);
+
+    PayrollAuditEntity toAuditEntity(PayrollPayload source);
+}
+@Mapper(componentModel = "spring")
+public interface PayrollTxnMapper {
+
+    PayrollTransactionEntity toEntity(PayrollTransactionPayload source);
+
+    PayrollTransactionAuditEntity toAuditEntity(PayrollTransactionPayload source);
+}
+@Mapper(componentModel = "spring")
+public interface EmpTxnMapper {
+
+    EmployeeTransactionEntity toEntity(EmployeeTransactionPayload source);
+
+    EmployeeTransactionAuditEntity toAuditEntity(EmployeeTransactionPayload source);
+}
+
 
 
