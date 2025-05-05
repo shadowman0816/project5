@@ -28,3 +28,73 @@ public class StorePayrollService {
         employeeTransactionPersistenceService.saveAllWithAudit(employeeTransactions);
     }
 }
+@Mapper(componentModel = "spring", unmappedTargetPolicy = ReportingPolicy.IGNORE)
+public interface PayrollTransactionMapper {
+
+    default List<PayrollTransactionEntity> toEntities(GetPayrollResponse response, PayrollEntity payrollEntity) {
+        Totals totals = response.getTotals();
+        List<PayrollTransactionEntity> transactions = new ArrayList<>();
+
+        transactions.add(buildTransaction(payrollEntity, "EMPLOYEE_PAYMENT", totals.getCheckAmount()));
+        transactions.add(buildTransaction(payrollEntity, "TAX_PAYMENT", totals.getEmployeeTaxes()));
+        transactions.add(buildTransaction(payrollEntity, "GARNISHMENT", totals.getChildSupportDebit()));
+
+        return transactions;
+    }
+
+    default PayrollTransactionEntity buildTransaction(PayrollEntity payrollEntity, String txnType, String amountStr) {
+        BigDecimal amount = new BigDecimal(Optional.ofNullable(amountStr).orElse("0"));
+        PayrollTransactionEntity entity = new PayrollTransactionEntity();
+
+        entity.setPrylEmpTxnId(UUID.randomUUID().toString());
+        entity.setPrylId(payrollEntity.getPrylId());
+        entity.setTxnTypNm(txnType);
+        entity.setTxnAm(amount);
+        entity.setTxnModeCd("ACH");
+        entity.setPayeeNm("SYSTEM");
+        entity.setPayeeTxnStsCd("COMPLETED");
+        entity.setHistIn('N');
+        entity.setProcDt(payrollEntity.getProcDt());
+        entity.setCreTs(Timestamp.from(Instant.now()));
+        entity.setCreUsrId(AppConstants.SYSTEM_USER);
+        entity.setUpdtTs(Timestamp.from(Instant.now()));
+        entity.setUpdtUsrId(AppConstants.SYSTEM_USER);
+
+        return entity;
+    }
+}
+@Mapper(componentModel = "spring", unmappedTargetPolicy = ReportingPolicy.IGNORE)
+public interface EmployeeTransactionMapper {
+
+    default List<EmployeeTransactionEntity> toEntities(List<EmployeeCompensations> employees, PayrollEntity payrollEntity) {
+        return employees.stream().map(emp -> {
+            EmployeeTransactionEntity entity = new EmployeeTransactionEntity();
+
+            entity.setPrylEmpTxnId(UUID.randomUUID().toString());
+            entity.setPrylId(payrollEntity.getPrylId());
+            entity.setPayeeAcctId(emp.getEmployeeUuid());
+            entity.setPayeeNm(emp.getEmployeeUuid());
+            entity.setTxnAm(emp.getCheckAmount());
+            entity.setTxnModeCd(emp.getPaymentMethod().name());
+            entity.setPayeeTxnStsCd("COMPLETED");
+            entity.setHistIn('N');
+            entity.setProcDt(payrollEntity.getProcDt());
+            entity.setCreTs(Timestamp.from(Instant.now()));
+            entity.setCreUsrId(AppConstants.SYSTEM_USER);
+            entity.setUpdtTs(Timestamp.from(Instant.now()));
+            entity.setUpdtUsrId(AppConstants.SYSTEM_USER);
+
+            return entity;
+        }).toList();
+    }
+}
+@Mapper(componentModel = "spring", unmappedTargetPolicy = ReportingPolicy.IGNORE)
+public interface PayrollMapper {
+    @Mapping(source = "payrollUuid", target = "prylId")
+    @Mapping(source = "companyUuid", target = "srcPrylId")
+    @Mapping(source = "checkDate", target = "checkDt")
+    @Mapping(source = "processedDate", target = "procDt")
+    PayrollEntity toEntity(GetPayrollResponse source);
+}
+
+
