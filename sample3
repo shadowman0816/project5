@@ -1,0 +1,56 @@
+package net.jpmchase.payroll.processor.steps.payroll;
+
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import net.jpmchase.payroll.processor.Step;
+import net.jpmchase.payroll.processor.WorkFlowContext;
+import net.jpmchase.payroll.processor.exception.ProcessorException;
+import net.jpmchase.payroll.processor.repository.HolidayCalendarRepository;
+import net.jpmchase.payroll.processor.repository.PayrollRepository;
+import net.jpmchase.payroll.processor.util.DateTimeUtil;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Component;
+
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.LocalTime;
+
+@Slf4j
+@Component
+@RequiredArgsConstructor
+public class ValidatePayrollProcessingWindowStep implements Step {
+
+    private final HolidayCalendarRepository holidayCalendarRepository;
+    private final PayrollRepository payrollRepository;
+
+    @Value("${payroll.processing.cutoff-time}")
+    private String cutoffTimeStr;
+
+    @Override
+    public void execute(WorkFlowContext context) {
+        String payrollId = context.get("SRC_PYRL_ID", String.class);
+        LocalDateTime eventReceivedTime = context.get("EVENT_RECEIVED_TS", LocalDateTime.class); // should be populated in read step
+
+        log.info("[STEP] Validating processing window for payrollId={}, receivedAt={}", payrollId, eventReceivedTime);
+
+        // 1. Validate cutoff time
+        LocalTime cutoffTime = LocalTime.parse(cutoffTimeStr); // e.g., "18:30"
+        if (eventReceivedTime.toLocalTime().isAfter(cutoffTime)) {
+            throw new ProcessorException("CUTOFF_TIME_EXCEEDED", "Webhook received after cutoff time: " + cutoffTimeStr);
+        }
+
+        // 2. Validate business day (not weekend and not holiday)
+        LocalDate processingDate = eventReceivedTime.toLocalDate();
+        if (DateTimeUtil.isWeekend(processingDate) || holidayCalendarRepository.existsByDate(processingDate)) {
+            throw new ProcessorException("INVALID_PROCESSING_DAY", "Today is not a valid processing day: " + processingDate);
+        }
+
+        // 3. Validate payroll record exists
+        boolean exists = payrollRepository.existsBySrcPayrollId(payrollId);
+        if (!exists) {
+            throw new ProcessorException("PAYROLL_NOT_FOUND", "No payroll record found for: " + payrollId);
+        }
+
+        log.info("[STEP] Processing window validated successfully for payrollId={}", payrollId);
+    }
+}
