@@ -1,0 +1,77 @@
+package net.jpmchase.payroll.processor.service;
+
+import net.jpmchase.payroll.processor.repository.mgmt.HolidayRepository;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.time.DayOfWeek;
+import java.time.LocalDate;
+
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
+
+class HolidayServiceTest {
+
+    private HolidayRepository holidayRepository;
+    private HolidayService holidayService;
+
+    @BeforeEach
+    void setUp() {
+        holidayRepository = mock(HolidayRepository.class);
+        holidayService = new HolidayService(holidayRepository);
+    }
+
+    @Test
+    void test_isHoliday_returnsTrue_whenDateIsHoliday() {
+        LocalDate date = LocalDate.of(2025, 12, 25); // Christmas
+        when(holidayRepository.existsByHolidayDate(date)).thenReturn(true);
+
+        assertTrue(holidayService.isHoliday(date));
+    }
+
+    @Test
+    void test_isHoliday_returnsFalse_whenDateIsNotHoliday() {
+        LocalDate date = LocalDate.of(2025, 12, 26);
+        when(holidayRepository.existsByHolidayDate(date)).thenReturn(false);
+
+        assertFalse(holidayService.isHoliday(date));
+    }
+
+    @Test
+    void test_getNextBusinessDay_skipsWeekendAndHoliday() {
+        LocalDate input = LocalDate.of(2025, 7, 3); // Thursday
+        LocalDate holiday = LocalDate.of(2025, 7, 4); // Friday (holiday)
+        LocalDate saturday = LocalDate.of(2025, 7, 5);
+        LocalDate sunday = LocalDate.of(2025, 7, 6);
+        LocalDate monday = LocalDate.of(2025, 7, 7); // Next business day
+
+        when(holidayRepository.existsByHolidayDate(holiday)).thenReturn(true);
+        when(holidayRepository.existsByHolidayDate(saturday)).thenReturn(false);
+        when(holidayRepository.existsByHolidayDate(sunday)).thenReturn(false);
+        when(holidayRepository.existsByHolidayDate(monday)).thenReturn(false);
+
+        LocalDate nextBusinessDay = holidayService.getNextBusinessDay(input.plusDays(1));
+        assertEquals(monday, nextBusinessDay);
+    }
+
+    @Test
+    void test_getNextBusinessDay_onBusinessDay() {
+        LocalDate input = LocalDate.of(2025, 5, 6); // Tuesday
+        when(holidayRepository.existsByHolidayDate(input)).thenReturn(false);
+
+        assertEquals(input, holidayService.getNextBusinessDay(input));
+    }
+
+    @Test
+    void test_getNextBusinessDay_continuousHolidays() {
+        LocalDate input = LocalDate.of(2025, 1, 1);
+        when(holidayRepository.existsByHolidayDate(any(LocalDate.class)))
+                .thenAnswer(invocation -> {
+                    LocalDate d = invocation.getArgument(0);
+                    return d.isBefore(LocalDate.of(2025, 1, 5)); // Jan 1 to Jan 4 are holidays
+                });
+
+        LocalDate result = holidayService.getNextBusinessDay(input);
+        assertEquals(LocalDate.of(2025, 1, 5), result);
+    }
+}
