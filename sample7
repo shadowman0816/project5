@@ -1,0 +1,77 @@
+package net.jpmchase.payroll.processor.steps.payroll;
+
+import net.jpmchase.payroll.processor.model.gusto.GetPayrollResponse;
+import net.jpmchase.payroll.processor.model.gusto.EmployeeCompensation;
+import net.jpmchase.payroll.processor.repository.mgmt.entity.EnrollmentEntity;
+import net.jpmchase.payroll.processor.service.ReconcileEmployeePaymentService;
+import net.jpmchase.payroll.processor.steps.context.WorkflowContext;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.util.Arrays;
+import java.util.Collections;
+
+import static org.mockito.Mockito.*;
+
+class ReconcileEmployeePaymentInformationStepTest {
+
+    private ReconcileEmployeePaymentInformationStep step;
+    private ReconcileEmployeePaymentService reconcileService;
+    private WorkflowContext context;
+
+    @BeforeEach
+    void setUp() {
+        reconcileService = mock(ReconcileEmployeePaymentService.class);
+        step = new ReconcileEmployeePaymentInformationStep(reconcileService);
+        context = mock(WorkflowContext.class);
+    }
+
+    @Test
+    void testExecute_withValidCompensations_shouldCallReconcile() {
+        GetPayrollResponse response = mock(GetPayrollResponse.class);
+        EnrollmentEntity enrollmentEntity = mock(EnrollmentEntity.class);
+        EmployeeCompensation emp1 = mock(EmployeeCompensation.class);
+        EmployeeCompensation emp2 = mock(EmployeeCompensation.class);
+
+        when(context.get(eq("GUSTO_SINGLE_PAYROLL"), eq(GetPayrollResponse.class))).thenReturn(response);
+        when(context.get(eq("COMPANY_ENROLLMENT"), eq(EnrollmentEntity.class))).thenReturn(enrollmentEntity);
+        when(context.get(eq("COMPANY_UUID"), eq(String.class))).thenReturn("company-123");
+        when(response.getEmployeeCompensations()).thenReturn(Arrays.asList(emp1, emp2));
+        when(enrollmentEntity.getRelEntpPrtyId()).thenReturn(100L);
+
+        step.execute(context);
+
+        verify(reconcileService).reconcile(emp1, 100L, "company-123");
+        verify(reconcileService).reconcile(emp2, 100L, "company-123");
+    }
+
+    @Test
+    void testExecute_withNoCompensations_shouldNotCallReconcile() {
+        GetPayrollResponse response = mock(GetPayrollResponse.class);
+        EnrollmentEntity enrollmentEntity = mock(EnrollmentEntity.class);
+
+        when(context.get(eq("GUSTO_SINGLE_PAYROLL"), eq(GetPayrollResponse.class))).thenReturn(response);
+        when(context.get(eq("COMPANY_ENROLLMENT"), eq(EnrollmentEntity.class))).thenReturn(enrollmentEntity);
+        when(context.get(eq("COMPANY_UUID"), eq(String.class))).thenReturn("company-123");
+        when(response.getEmployeeCompensations()).thenReturn(Collections.emptyList());
+
+        step.execute(context);
+
+        verify(reconcileService, never()).reconcile(any(), anyLong(), anyString());
+    }
+
+    @Test
+    void testExecute_withNullCompensations_shouldNotCallReconcile() {
+        GetPayrollResponse response = mock(GetPayrollResponse.class);
+        EnrollmentEntity enrollmentEntity = mock(EnrollmentEntity.class);
+
+        when(context.get(eq("GUSTO_SINGLE_PAYROLL"), eq(GetPayrollResponse.class))).thenReturn(response);
+        when(context.get(eq("COMPANY_ENROLLMENT"), eq(EnrollmentEntity.class))).thenReturn(enrollmentEntity);
+        when(context.get(eq("COMPANY_UUID"), eq(String.class))).thenReturn("company-123");
+        when(response.getEmployeeCompensations()).thenReturn(null);
+
+        step.execute(context);
+
+        verify(reconcileService, never()).reconcile(any(), anyLong(), anyString());
+    }
+}
