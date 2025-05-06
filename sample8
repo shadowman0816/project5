@@ -157,3 +157,130 @@ public class GustoSinglePayrollInformationRetrievalStepTest {
         verify(context).put(WorkflowContextUtil.GUSTO_SINGLE_PAYROLL, response);
     }
 }
+
+package net.jpmchase.payroll.processor.repository.mgmt.mapper;
+
+import net.jpmchase.payroll.processor.remote.gusto.model.payroll.GetPayrollResponse;
+import net.jpmchase.payroll.processor.remote.gusto.model.payroll.EmployeeCompensations;
+import net.jpmchase.payroll.processor.remote.gusto.model.payroll.Tax;
+import net.jpmchase.payroll.processor.remote.gusto.model.payroll.Deduction;
+import net.jpmchase.payroll.processor.repository.mgmt.entity.payroll.PayrollTransactionEntity;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.math.BigDecimal;
+import java.sql.Timestamp;
+import java.time.Instant;
+import java.util.Collections;
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
+
+class PayrollTransactionEntityMapperTest {
+
+    private GetPayrollResponse response;
+    private final String srcEvtId = "EVT001";
+    private final String actorEntpPrtyId = "ACT001";
+    private final String srcPayrollId = "PAYROLL001";
+    private final Long omnibusAcctId = 999L;
+
+    @BeforeEach
+    void setUp() {
+        response = new GetPayrollResponse();
+        response.setProcessedDate(Timestamp.from(Instant.parse("2024-10-15T00:00:00Z")).toString());
+
+        EmployeeCompensations emp = new EmployeeCompensations();
+        emp.setEmployeeUuid("EMP123");
+        emp.setNetPay("200.00");
+        emp.setCheckAmount("180.00");
+        emp.setPaymentType("direct_deposit");
+
+        Tax tax = new Tax();
+        tax.setAmount("20.00");
+        emp.setTaxes(List.of(tax));
+
+        Deduction deduction = new Deduction();
+        deduction.setAmount("5.00");
+        emp.setDeductions(List.of(deduction));
+
+        response.setEmployeeCompensations(List.of(emp));
+    }
+
+    @Test
+    void testMapAllFrom_withFullData_shouldCreateTransactions() {
+        List<PayrollTransactionEntity> result = PayrollTransactionEntityMapper.INSTANCE.mapAllFrom(
+                response, srcEvtId, actorEntpPrtyId, srcPayrollId, omnibusAcctId
+        );
+
+        assertEquals(3, result.size());
+
+        assertTrue(result.stream().anyMatch(txn -> "EMPLOYEE".equals(txn.getTxnTypeNm())));
+        assertTrue(result.stream().anyMatch(txn -> "TAX".equals(txn.getTxnTypeNm())));
+        assertTrue(result.stream().anyMatch(txn -> "GARNISHMENT".equals(txn.getTxnTypeNm())));
+    }
+
+    @Test
+    void testMapAllFrom_withNullTaxesAndDeductions_shouldCreateOnlyEmployeeTransaction() {
+        EmployeeCompensations emp = new EmployeeCompensations();
+        emp.setEmployeeUuid("EMP456");
+        emp.setNetPay("100.00");
+        emp.setCheckAmount("100.00");
+        emp.setPaymentType("direct_deposit");
+
+        response.setEmployeeCompensations(List.of(emp));
+
+        List<PayrollTransactionEntity> result = PayrollTransactionEntityMapper.INSTANCE.mapAllFrom(
+                response, srcEvtId, actorEntpPrtyId, srcPayrollId, omnibusAcctId
+        );
+
+        assertEquals(1, result.size());
+        assertEquals("EMPLOYEE", result.get(0).getTxnTypeNm());
+    }
+
+    @Test
+    void testMapAllFrom_withNullEmployeeCompensations_shouldReturnEmptyList() {
+        response.setEmployeeCompensations(null);
+
+        List<PayrollTransactionEntity> result = PayrollTransactionEntityMapper.INSTANCE.mapAllFrom(
+                response, srcEvtId, actorEntpPrtyId, srcPayrollId, omnibusAcctId
+        );
+
+        assertTrue(result.isEmpty());
+    }
+
+    @Test
+    void testMapAllFrom_withEmptyEmployeeCompensations_shouldReturnEmptyList() {
+        response.setEmployeeCompensations(Collections.emptyList());
+
+        List<PayrollTransactionEntity> result = PayrollTransactionEntityMapper.INSTANCE.mapAllFrom(
+                response, srcEvtId, actorEntpPrtyId, srcPayrollId, omnibusAcctId
+        );
+
+        assertTrue(result.isEmpty());
+    }
+
+    @Test
+    void testMapAllFrom_withNullNetPay_shouldStillProcessOtherTransactions() {
+        EmployeeCompensations emp = new EmployeeCompensations();
+        emp.setEmployeeUuid("EMP789");
+        emp.setNetPay(null);
+        emp.setCheckAmount("150.00");
+        emp.setPaymentType("check");
+
+        Tax tax = new Tax();
+        tax.setAmount("10.00");
+        emp.setTaxes(List.of(tax));
+        emp.setDeductions(null);
+
+        response.setEmployeeCompensations(List.of(emp));
+
+        List<PayrollTransactionEntity> result = PayrollTransactionEntityMapper.INSTANCE.mapAllFrom(
+                response, srcEvtId, actorEntpPrtyId, srcPayrollId, omnibusAcctId
+        );
+
+        assertEquals(1, result.size());
+        assertEquals("TAX", result.get(0).getTxnTypeNm());
+    }
+}
