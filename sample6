@@ -1,0 +1,72 @@
+@Slf4j
+@RequiredArgsConstructor
+@Component
+public class CustomerEligibilityValidationStep implements Step {
+
+    private final CustomerConfigurationService customerConfigurationService;
+
+    @Override
+    public void execute(WorkflowContext context) {
+        String companyId = context.get("COMPANY_ID", String.class);
+        String profileId = context.get("PROFILE_ID", String.class);
+        String productId = context.get("PRODUCT_ID", String.class);
+        String segmentId = context.get("SEGMENT_ID", String.class);
+        String enrollmentId = context.get("ENROLLMENT_ID", String.class);
+
+        GetPayrollResponse payrollResponse = context.get("GUSTO_SINGLE_PAYROLL", GetPayrollResponse.class);
+
+        try {
+            customerConfigurationService.validateProductAndAccountEligibility(
+                enrollmentId, companyId, productId, profileId
+            );
+        } catch (ProcessorException ex) {
+            log.error("[STEP] Customer eligibility validation failed", ex);
+            throw new ProcessorException("INTERNAL_ELIGIBILITY_FAILED", "Product/account eligibility validation failed.");
+        }
+
+        try {
+            customerConfigurationService.validateCustomerLimit(
+                Long.parseLong(profileId),
+                Long.parseLong(productId),
+                segmentId,
+                payrollResponse
+            );
+        } catch (ProcessorException ex) {
+            log.error("[STEP] Customer limit check failed", ex);
+            throw new ProcessorException("DAILY_LIMIT_EXCEEDED", "Customer daily transaction limit exceeded.");
+        }
+
+        log.info("[STEP] Customer eligibility and limit validation passed for companyId={}", companyId);
+    }
+}
+public void validateCustomerLimit(
+    long profileId, long productId, String segmentId, GetPayrollResponse payrollResponse
+) {
+    ProfileLimit profileLimit = limitUtilityService.getSegmentProfileLimit(profileId, productId, segmentId, AppConstants.PAYROLL_PRODUCT_NAME);
+    double limit = getLimit(profileLimit);
+
+    BigDecimal total = calculateTotal(payrollResponse);
+    if (total.doubleValue() > limit) {
+        throw new ProcessorException("DAILY_LIMIT_EXCEEDED", "Total payroll amount exceeds customer daily limit.");
+    }
+}
+
+private BigDecimal calculateTotal(GetPayrollResponse response) {
+    BigDecimal total = BigDecimal.ZERO;
+
+    for (EmployeeCompensations emp : response.getEmployeeCompensations()) {
+        if (emp.getNetPay() != null && emp.getPaymentMethod() == PaymentMethod.DIRECT_DEPOSIT) {
+            total = total.add(emp.getNetPay());
+        }
+
+        if (emp.getTaxes() != null) {
+            for (EmployeeCompensations.Taxes tax : emp.getTaxes()) {
+                if (tax.isEmployer()) {
+                    total = total.add(tax.getAmount());
+                }
+            }
+        }
+    }
+
+    return total;
+}
