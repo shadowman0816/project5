@@ -75,3 +75,13 @@ class HolidayServiceTest {
         assertEquals(LocalDate.of(2025, 1, 5), result);
     }
 }
+LocalDate procDate = LocalDate.now();
+LocalDate expectedCheckDate = procDate.plusDays(1);
+
+// Simulate skipping weekends/holidays
+while (expectedCheckDate.getDayOfWeek() == DayOfWeek.SATURDAY ||
+       expectedCheckDate.getDayOfWeek() == DayOfWeek.SUNDAY) {
+    expectedCheckDate = expectedCheckDate.plusDays(1);
+}
+
+when(payrollResponse.getCheckDate()).thenReturn(expectedCheckDate.toString());
