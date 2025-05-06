@@ -75,3 +75,86 @@ class ReconcileEmployeePaymentInformationStepTest {
         verify(reconcileService, never()).reconcile(any(), anyLong(), anyString());
     }
 }
+@ExtendWith(MockitoExtension.class)
+class ReadIncomingPayrollProcessedEventStepTest {
+
+    @InjectMocks
+    private ReadIncomingPayrollProcessedEventStep step;
+
+    @Mock
+    private WorkflowContext context;
+
+    @Test
+    void testExecute_withValidEvent_shouldPopulateContext() {
+        UUID payrollId = UUID.randomUUID();
+        UUID companyId = UUID.randomUUID();
+        String messageId = "msg123";
+        long timestamp = System.currentTimeMillis();
+
+        Event event = mock(Event.class);
+        MessageBody messageBody = mock(MessageBody.class);
+
+        when(context.get(Event.class)).thenReturn(event);
+        when(event.getMessageId()).thenReturn(messageId);
+        when(event.getMessageBody()).thenReturn(messageBody);
+        when(messageBody.getPayrollId()).thenReturn(payrollId);
+        when(messageBody.getCompanyUuid()).thenReturn(companyId);
+        when(messageBody.getTimestamp()).thenReturn(timestamp);
+
+        step.execute(context);
+
+        verify(context).put(eq(AppConstants.PAYROLL_ID), eq(payrollId));
+        verify(context).put(eq(AppConstants.COMPANY_UUID), eq(companyId));
+        verify(context).put(eq(AppConstants.MESSAGE_ID), eq(messageId));
+        verify(context).put(eq(AppConstants.PAYEE_TYPE), eq(PayeeType.EMPLOYEE.name()));
+        verify(context).put(eq(AppConstants.TIMESTAMP), eq(timestamp));
+    }
+
+    @Test
+    void testExecute_missingPayrollId_shouldThrowException() {
+        Event event = mock(Event.class);
+        MessageBody messageBody = mock(MessageBody.class);
+
+        when(context.get(Event.class)).thenReturn(event);
+        when(event.getMessageBody()).thenReturn(messageBody);
+        when(event.getMessageId()).thenReturn("msg123");
+        when(messageBody.getPayrollId()).thenReturn(null);
+
+        ProcessorException ex = assertThrows(ProcessorException.class, () -> step.execute(context));
+        assertTrue(ex.getMessage().contains("Message Id"));
+    }
+
+    @Test
+    void testExecute_missingCompanyUuid_shouldThrowException() {
+        UUID payrollId = UUID.randomUUID();
+        Event event = mock(Event.class);
+        MessageBody messageBody = mock(MessageBody.class);
+
+        when(context.get(Event.class)).thenReturn(event);
+        when(event.getMessageBody()).thenReturn(messageBody);
+        when(event.getMessageId()).thenReturn("msg123");
+        when(messageBody.getPayrollId()).thenReturn(payrollId);
+        when(messageBody.getCompanyUuid()).thenReturn(null);
+
+        ProcessorException ex = assertThrows(ProcessorException.class, () -> step.execute(context));
+        assertTrue(ex.getMessage().contains("Company UUID"));
+    }
+
+    @Test
+    void testExecute_missingTimestamp_shouldThrowException() {
+        UUID payrollId = UUID.randomUUID();
+        UUID companyId = UUID.randomUUID();
+        Event event = mock(Event.class);
+        MessageBody messageBody = mock(MessageBody.class);
+
+        when(context.get(Event.class)).thenReturn(event);
+        when(event.getMessageBody()).thenReturn(messageBody);
+        when(event.getMessageId()).thenReturn("msg123");
+        when(messageBody.getPayrollId()).thenReturn(payrollId);
+        when(messageBody.getCompanyUuid()).thenReturn(companyId);
+        when(messageBody.getTimestamp()).thenReturn(null);
+
+        ProcessorException ex = assertThrows(ProcessorException.class, () -> step.execute(context));
+        assertTrue(ex.getMessage().contains("Timestamp"));
+    }
+}
