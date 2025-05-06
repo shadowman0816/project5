@@ -383,6 +383,21 @@ public interface EmployeeTransactionMapper {
         return Timestamp.from(Instant.now());
     }
 }
+LocalDate procDate = LocalDate.parse(payrollResponse.getProcessedDate());
+LocalDate actualCheckDate = LocalDate.parse(payrollResponse.getCheckDate());
 
+// Derive expected check date from procDate
+LocalDate expectedCheckDate = procDate.plusDays(1);
+
+// Loop to get the next business day
+while (HolidayService.isHoliday(expectedCheckDate) || isWeekend(expectedCheckDate)) {
+    expectedCheckDate = expectedCheckDate.plusDays(1);
+}
+
+// Compare expected vs actual check date
+if (!actualCheckDate.equals(expectedCheckDate)) {
+    throw new ProcessorException(CHECK_DATE_MISMATCH.getCode(),
+        String.format("Expected check date to be %s, but got %s", expectedCheckDate, actualCheckDate));
+}
 
 
