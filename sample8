@@ -1,0 +1,92 @@
+@ExtendWith(MockitoExtension.class)
+class PayrollProcessingWindowDeterminationStepTest {
+
+    @InjectMocks
+    private PayrollProcessingWindowDeterminationStep step;
+
+    @Mock
+    private HolidayService holidayService;
+
+    @Mock
+    private PayrollRepository payrollRepository;
+
+    @Mock
+    private WorkflowContext context;
+
+    @Mock
+    private GetPayrollResponse payrollResponse;
+
+    @BeforeEach
+    void setup() {
+        ReflectionTestUtils.setField(step, "cutoffTimeStr", "16:00");
+    }
+
+    @Test
+    void shouldPassWhenProcessingWindowIsValid() {
+        String payrollId = "PR001";
+        String timestamp = String.valueOf(Instant.now().getEpochSecond());
+        String procDate = LocalDate.now().toString();
+        String checkDate = procDate;
+
+        when(context.get(eq("PAYROLL_ID"), eq(String.class))).thenReturn(payrollId);
+        when(context.get(eq("TIMESTAMP"), eq(String.class))).thenReturn(timestamp);
+        when(context.get(eq("GUSTO_SINGLE_PAYROLL"), eq(GetPayrollResponse.class))).thenReturn(payrollResponse);
+        when(payrollResponse.getProcessedDate()).thenReturn(procDate);
+        when(payrollResponse.getCheckDate()).thenReturn(checkDate);
+        when(holidayService.isHoliday(any())).thenReturn(false);
+        when(payrollRepository.findBySrcPayrollId(payrollId)).thenReturn(Optional.of(new PayrollEntity()));
+
+        assertDoesNotThrow(() -> step.execute(context));
+    }
+
+    @Test
+    void shouldFailIfCutoffTimeBreached() {
+        String timestamp = String.valueOf(
+                ZonedDateTime.of(LocalDate.now(), LocalTime.of(18, 0), ZoneId.systemDefault()).toEpochSecond());
+
+        when(context.get(eq("TIMESTAMP"), eq(String.class))).thenReturn(timestamp);
+
+        assertThrows(ProcessorException.class, () -> step.execute(context));
+    }
+
+    @Test
+    void shouldFailIfProcessedDateIsHoliday() {
+        String procDate = LocalDate.now().toString();
+
+        setupDefaultContext(procDate, procDate);
+        when(holidayService.isHoliday(LocalDate.parse(procDate))).thenReturn(true);
+
+        assertThrows(ProcessorException.class, () -> step.execute(context));
+    }
+
+    @Test
+    void shouldFailIfCheckDateMismatch() {
+        String procDate = LocalDate.now().toString();
+        String actualCheckDate = LocalDate.now().plusDays(3).toString();
+
+        setupDefaultContext(procDate, actualCheckDate);
+        when(holidayService.isHoliday(any())).thenReturn(false);
+
+        assertThrows(ProcessorException.class, () -> step.execute(context));
+    }
+
+    @Test
+    void shouldFailIfPayrollRecordMissing() {
+        String procDate = LocalDate.now().toString();
+
+        setupDefaultContext(procDate, procDate);
+        when(holidayService.isHoliday(any())).thenReturn(false);
+        when(payrollRepository.findBySrcPayrollId(anyString())).thenReturn(Optional.empty());
+
+        assertThrows(ProcessorException.class, () -> step.execute(context));
+    }
+
+    private void setupDefaultContext(String procDate, String checkDate) {
+        when(context.get(eq("PAYROLL_ID"), eq(String.class))).thenReturn("PR001");
+        when(context.get(eq("TIMESTAMP"), eq(String.class))).thenReturn(String.valueOf(Instant.now().getEpochSecond()));
+        when(context.get(eq("GUSTO_SINGLE_PAYROLL"), eq(GetPayrollResponse.class))).thenReturn(payrollResponse);
+        when(payrollResponse.getProcessedDate()).thenReturn(procDate);
+        when(payrollResponse.getCheckDate()).thenReturn(checkDate);
+        when(payrollRepository.findBySrcPayrollId("PR001")).thenReturn(Optional.of(new PayrollEntity()));
+    }
+}
