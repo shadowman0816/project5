@@ -284,3 +284,106 @@ class PayrollTransactionEntityMapperTest {
         assertEquals("TAX", result.get(0).getTxnTypeNm());
     }
 }
+package net.jpmchase.payroll.processor.repository.mgmt.mapper;
+
+import net.jpmchase.payroll.processor.remote.gusto.model.payroll.GetPayrollResponse;
+import net.jpmchase.payroll.processor.remote.gusto.model.payroll.EmployeeCompensations;
+import net.jpmchase.payroll.processor.repository.mgmt.entity.payroll.EmployeeTransactionEntity;
+import net.jpmchase.payroll.processor.utils.AppConstants;
+import net.jpmchase.payroll.processor.utils.PayrollCalculationUtils;
+import net.jpmchase.payroll.processor.utils.enums.PayrollStatus;
+import net.jpmchase.payroll.processor.utils.enums.PaymentMethod;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.math.BigDecimal;
+import java.sql.Timestamp;
+import java.time.Instant;
+import java.util.Collections;
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
+
+class EmployeeTransactionMapperTest {
+
+    private GetPayrollResponse response;
+    private EmployeeCompensations empComp;
+
+    @BeforeEach
+    void setup() {
+        empComp = new EmployeeCompensations();
+        empComp.setEmployeeUuid("emp-123");
+        empComp.setMemo("Memo Text");
+        empComp.setCheckAmount(new BigDecimal("250.75"));
+        empComp.setPaymentMethod(PaymentMethod.DirectDeposit);
+
+        response = new GetPayrollResponse();
+        response.setEmployeeCompensations(Collections.singletonList(empComp));
+        response.setProcessedDate(Timestamp.from(Instant.now()).toString());
+    }
+
+    @Test
+    void test_mapAllFrom_returnsTransactions() {
+        List<EmployeeTransactionEntity> result = EmployeeTransactionMapper.INSTANCE.mapAllFrom(
+                response, "srcPayrollId", "srcEventId");
+
+        assertEquals(1, result.size());
+        EmployeeTransactionEntity txn = result.get(0);
+
+        assertEquals("srcPayrollId", txn.getSrcPayrollId());
+        assertEquals("srcEventId", txn.getSrcEvtId());
+        assertEquals("emp-123", txn.getSrcPayeeId());
+        assertEquals(new BigDecimal("250.75"), txn.getTxnAm());
+        assertEquals(PayrollStatus.PENDING.getCode(), txn.getPayeeTxnStsCd());
+        assertEquals(PaymentMethod.DirectDeposit, txn.getTxnModeCd());
+    }
+
+    @Test
+    void test_mapAllFrom_checkMemoIsMapped() {
+        empComp.setMemo("Salary for March");
+        List<EmployeeTransactionEntity> result = EmployeeTransactionMapper.INSTANCE.mapAllFrom(
+                response, "srcPayrollId", "srcEventId");
+
+        assertEquals("Salary for March", result.get(0).getErrDescTx());
+    }
+
+    @Test
+    void test_mapAllFrom_withNullCheckAmount_setsZeroTxnAm() {
+        empComp.setCheckAmount(null);
+        List<EmployeeTransactionEntity> result = EmployeeTransactionMapper.INSTANCE.mapAllFrom(
+                response, "srcPayrollId", "srcEventId");
+
+        assertEquals(BigDecimal.ZERO, result.get(0).getTxnAm());
+    }
+
+    @Test
+    void test_mapAllFrom_withPaymentMethodNull_defaultsToCheckCalculation() {
+        empComp.setPaymentMethod(null);
+        List<EmployeeTransactionEntity> result = EmployeeTransactionMapper.INSTANCE.mapAllFrom(
+                response, "srcPayrollId", "srcEventId");
+
+        assertNotNull(result.get(0).getTxnAm());
+    }
+
+    @Test
+    void test_mapAllFrom_withEmptyEmployees_returnsEmptyList() {
+        response.setEmployeeCompensations(Collections.emptyList());
+        List<EmployeeTransactionEntity> result = EmployeeTransactionMapper.INSTANCE.mapAllFrom(
+                response, "srcPayrollId", "srcEventId");
+
+        assertTrue(result.isEmpty());
+    }
+
+    @Test
+    void test_mapAllFrom_setsDefaultAuditFields() {
+        List<EmployeeTransactionEntity> result = EmployeeTransactionMapper.INSTANCE.mapAllFrom(
+                response, "srcPayrollId", "srcEventId");
+
+        EmployeeTransactionEntity txn = result.get(0);
+        assertEquals(AppConstants.SYSTEM_USER, txn.getCreUsrId());
+        assertEquals(AppConstants.SYSTEM_USER, txn.getUpdtUsrId());
+        assertNotNull(txn.getCreTs());
+        assertNotNull(txn.getUpdtTs());
+    }
+}
