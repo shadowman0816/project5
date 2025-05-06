@@ -158,3 +158,66 @@ class ReadIncomingPayrollProcessedEventStepTest {
         assertTrue(ex.getMessage().contains("Timestamp"));
     }
 }
+@ExtendWith(MockitoExtension.class)
+class PersistPayrollHierarchyToDBStepTest {
+
+    @InjectMocks
+    private PersistPayrollHierarchyToDBStep step;
+
+    @Mock
+    private StorePayrollService storePayrollService;
+
+    @Mock
+    private WorkflowContext context;
+
+    @Mock
+    private GetPayrollResponse payrollResponse;
+
+    @Mock
+    private PayrollEnrolledProfileEntity companyEnrolledProfile;
+
+    private final String srcPayrollId = "test-pyrl-id";
+    private final String srcEventId = "event-123";
+    private final String actorEntpPrtyId = "entp-prty-456";
+
+    @BeforeEach
+    void setUp() {
+        when(context.get(eq(PAYROLL_ID), eq(String.class))).thenReturn(srcPayrollId);
+        when(context.get(eq(MESSAGE_ID), eq(String.class))).thenReturn(srcEventId);
+        when(context.get(eq(GUSTO_SINGLE_PAYROLL), eq(GetPayrollResponse.class))).thenReturn(payrollResponse);
+        when(context.get(eq(COMPANY_ENROLL_PROFILE), eq(PayrollEnrolledProfileEntity.class))).thenReturn(companyEnrolledProfile);
+        when(companyEnrolledProfile.getActorEntpPrtyId()).thenReturn(actorEntpPrtyId);
+    }
+
+    @Test
+    void testExecute_shouldCallStorePayrollService() {
+        step.execute(context);
+
+        verify(storePayrollService).persist(eq(payrollResponse), eq(srcEventId), eq(actorEntpPrtyId), eq(srcPayrollId));
+        verifyNoMoreInteractions(storePayrollService);
+    }
+
+    @Test
+    void testExecute_shouldHandleNullActorEntpPrtyId() {
+        when(companyEnrolledProfile.getActorEntpPrtyId()).thenReturn(null);
+
+        step.execute(context);
+
+        verify(storePayrollService).persist(eq(payrollResponse), eq(srcEventId), isNull(), eq(srcPayrollId));
+    }
+
+    @Test
+    void testExecute_shouldThrowExceptionWhenPayrollResponseMissing() {
+        when(context.get(eq(GUSTO_SINGLE_PAYROLL), eq(GetPayrollResponse.class))).thenReturn(null);
+
+        assertThrows(NullPointerException.class, () -> step.execute(context));
+    }
+
+    @Test
+    void testExecute_shouldThrowExceptionWhenEnrolledProfileMissing() {
+        when(context.get(eq(COMPANY_ENROLL_PROFILE), eq(PayrollEnrolledProfileEntity.class))).thenReturn(null);
+
+        assertThrows(NullPointerException.class, () -> step.execute(context));
+    }
+}
+
