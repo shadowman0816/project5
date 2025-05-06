@@ -90,3 +90,70 @@ class PayrollProcessingWindowDeterminationStepTest {
         when(payrollRepository.findBySrcPayrollId("PR001")).thenReturn(Optional.of(new PayrollEntity()));
     }
 }
+package net.jpmchase.payroll.processor.steps.payroll.gusto;
+
+import net.jpmchase.payroll.processor.exception.ProcessorException;
+import net.jpmchase.payroll.processor.repository.enrl.EnrollmentRepository;
+import net.jpmchase.payroll.processor.service.gusto.retrieval.PayrollService;
+import net.jpmchase.payroll.processor.steps.common.context.WorkflowContext;
+import net.jpmchase.payroll.processor.steps.common.context.WorkflowContextUtil;
+import net.jpmchase.payroll.processor.remote.gusto.model.payroll.GetPayrollResponse;
+import net.jpmchase.payroll.processor.repository.enrl.entity.EnrollmentEntity;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
+
+import java.util.Optional;
+
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
+
+public class GustoSinglePayrollInformationRetrievalStepTest {
+
+    private PayrollService payrollService;
+    private EnrollmentRepository enrollmentRepository;
+    private GustoSinglePayrollInformationRetrievalStep step;
+    private WorkflowContext context;
+
+    @BeforeEach
+    void setUp() {
+        payrollService = mock(PayrollService.class);
+        enrollmentRepository = mock(EnrollmentRepository.class);
+        context = mock(WorkflowContext.class);
+        step = new GustoSinglePayrollInformationRetrievalStep(payrollService, enrollmentRepository);
+    }
+
+    @Test
+    void shouldThrowIfEnrollmentIsMissing() {
+        String companyId = "COMP123";
+        String payrollId = "PYRL001";
+
+        when(context.get(WorkflowContextUtil.COMPANY_UUID, String.class)).thenReturn(companyId);
+        when(context.get(WorkflowContextUtil.PAYROLL_ID, String.class)).thenReturn(payrollId);
+        when(enrollmentRepository.findRelEntPtryIdBySrcCoId(companyId)).thenReturn(Optional.empty());
+
+        ProcessorException exception = assertThrows(ProcessorException.class, () -> step.execute(context));
+        assertTrue(exception.getMessage().contains(companyId));
+        verify(enrollmentRepository).findRelEntPtryIdBySrcCoId(companyId);
+    }
+
+    @Test
+    void shouldRetrieveAndPutPayrollResponseIfEnrollmentFound() {
+        String companyId = "COMP123";
+        String payrollId = "PYRL001";
+        EnrollmentEntity enrollment = new EnrollmentEntity();
+        enrollment.setRelEntPtryId("ACTOR001");
+
+        GetPayrollResponse response = new GetPayrollResponse();
+
+        when(context.get(WorkflowContextUtil.COMPANY_UUID, String.class)).thenReturn(companyId);
+        when(context.get(WorkflowContextUtil.PAYROLL_ID, String.class)).thenReturn(payrollId);
+        when(enrollmentRepository.findRelEntPtryIdBySrcCoId(companyId)).thenReturn(Optional.of(enrollment));
+        when(payrollService.getSinglePayroll("ACTOR001", companyId, payrollId)).thenReturn(response);
+
+        step.execute(context);
+
+        verify(context).put(WorkflowContextUtil.ENROLLMENT, enrollment);
+        verify(context).put(WorkflowContextUtil.GUSTO_SINGLE_PAYROLL, response);
+    }
+}
