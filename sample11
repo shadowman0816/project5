@@ -92,3 +92,131 @@ class ReconcileEmployeePaymentServiceTest {
         );
     }
 }
+package net.jpmchase.payroll.processor.steps.payroll;
+
+import net.jpmchase.payroll.processor.remote.gusto.model.payroll.GetPayrollResponse;
+import net.jpmchase.payroll.processor.repository.enrl.entity.EnrollmentEntity;
+import net.jpmchase.payroll.processor.repository.mgmt.entity.PayeeAccountEntity;
+import net.jpmchase.payroll.processor.service.ReconcileEmployeePaymentService;
+import net.jpmchase.payroll.processor.service.retrieval.PaymentConfigurationService;
+import net.jpmchase.payroll.processor.steps.common.WorkflowContext;
+import net.jpmchase.payroll.processor.steps.common.WorkflowContextUtil;
+import net.jpmchase.payroll.processor.steps.utils.ErrorCode;
+import net.jpmchase.payroll.processor.steps.utils.ProcessorException;
+import net.jpmchase.payroll.processor.steps.workflow.Step;
+import net.jpmchase.payroll.processor.repository.mgmt.PayeeAccountRepository;
+import net.jpmchase.payroll.processor.remote.gusto.model.payroll.EmployeeCompensations;
+import net.jpmchase.payroll.processor.remote.gusto.model.payroll.Split;
+import net.jpmchase.payroll.processor.remote.gusto.model.payroll.EmployeePaymentConfiguration;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
+
+import java.util.*;
+
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
+
+class ReconcileEmployeePaymentInformationStepTest {
+
+    private ReconcileEmployeePaymentInformationStep step;
+    private ReconcileEmployeePaymentService reconcileService;
+    private PaymentConfigurationService paymentConfigurationService;
+    private PayeeAccountRepository payeeAccountRepository;
+
+    private WorkflowContext context;
+    private GetPayrollResponse payrollResponse;
+    private EnrollmentEntity enrollmentEntity;
+
+    @BeforeEach
+    void setup() {
+        reconcileService = mock(ReconcileEmployeePaymentService.class);
+        paymentConfigurationService = mock(PaymentConfigurationService.class);
+        payeeAccountRepository = mock(PayeeAccountRepository.class);
+        step = new ReconcileEmployeePaymentInformationStep(reconcileService, paymentConfigurationService, payeeAccountRepository);
+
+        context = new WorkflowContext();
+        payrollResponse = new GetPayrollResponse();
+        enrollmentEntity = new EnrollmentEntity();
+
+        context.put("GUSTO_SINGLE_PAYROLL", payrollResponse);
+        context.put("COMPANY_ENROLLMENT", enrollmentEntity);
+        context.put("COMPANY_UUID", "company-123");
+    }
+
+    @Test
+    void shouldSkipWhenNoEmployeeCompensations() {
+        payrollResponse.setEmployeeCompensations(null);
+
+        step.execute(context);
+
+        // No exception should be thrown and step completes
+        assertTrue(context.getKeys().isEmpty() || !context.getKeys().contains("BANK_ACCOUNT_TO_PAYEE_ACCOUNT_MAP"));
+    }
+
+    @Test
+    void shouldThrowExceptionWhenPayeeAccountsMissing() {
+        EmployeeCompensations empComp = new EmployeeCompensations();
+        empComp.setEmployeeUuid("emp-1");
+        payrollResponse.setEmployeeCompensations(List.of(empComp));
+
+        when(paymentConfigurationService.getPaymentConfigurationsForAnEmployee(any(), any(), eq("emp-1")))
+                .thenReturn(new EmployeePaymentConfiguration());
+
+        when(payeeAccountRepository.findBySourcePayeeId("emp-1")).thenReturn(Collections.emptyList());
+
+        ProcessorException ex = assertThrows(ProcessorException.class, () -> step.execute(context));
+        assertEquals(ErrorCode.EMPLOYEE_BANK_ACCOUNTS_NOT_FOUND_PYRL.getCode(), ex.getCode());
+    }
+
+    @Test
+    void shouldMapBankAccountsCorrectly() {
+        String employeeId = "emp-1";
+        String bankUuid = "bank-uuid";
+        String payeeAccountId = "payee-account-id";
+
+        EmployeeCompensations empComp = new EmployeeCompensations();
+        empComp.setEmployeeUuid(employeeId);
+        payrollResponse.setEmployeeCompensations(List.of(empComp));
+
+        Split split = new Split();
+        split.setBankAccountUuid(bankUuid);
+        EmployeePaymentConfiguration config = new EmployeePaymentConfiguration();
+        config.setSplits(List.of(split));
+
+        when(paymentConfigurationService.getPaymentConfigurationsForAnEmployee(any(), any(), eq(employeeId)))
+                .thenReturn(config);
+
+        PayeeAccountEntity payeeAccount = new PayeeAccountEntity();
+        payeeAccount.setSrcBnkId(bankUuid);
+        payeeAccount.setPyrllPayeeAcctId(payeeAccountId);
+
+        when(payeeAccountRepository.findBySourcePayeeId(employeeId))
+                .thenReturn(List.of(payeeAccount));
+
+        step.execute(context);
+
+        Map<String, String> result = context.get("BANK_ACCOUNT_TO_PAYEE_ACCOUNT_MAP", Map.class);
+        assertNotNull(result);
+        assertEquals(1, result.size());
+        assertEquals(payeeAccountId, result.get(bankUuid));
+    }
+
+    @Test
+    void shouldNotPutMapIfNoSplits() {
+        EmployeeCompensations empComp = new EmployeeCompensations();
+        empComp.setEmployeeUuid("emp-1");
+        payrollResponse.setEmployeeCompensations(List.of(empComp));
+
+        EmployeePaymentConfiguration config = new EmployeePaymentConfiguration();
+        config.setSplits(null);
+
+        when(paymentConfigurationService.getPaymentConfigurationsForAnEmployee(any(), any(), any()))
+                .thenReturn(config);
+
+        step.execute(context);
+
+        assertFalse(context.getKeys().contains("BANK_ACCOUNT_TO_PAYEE_ACCOUNT_MAP"));
+    }
+}
