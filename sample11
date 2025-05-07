@@ -1,0 +1,94 @@
+@ExtendWith(MockitoExtension.class)
+class ReconcileEmployeePaymentServiceTest {
+
+    @InjectMocks
+    private ReconcileEmployeePaymentService reconcileService;
+
+    private static final String EMPLOYEE_ID = "emp-123";
+    private static final String ROUTING = "011000015";
+    private static final String ACCOUNT = "123456789";
+
+    @Test
+    void shouldPassWhenAllSplitsMatchPayeeAccounts() {
+        EmployeeCompensations emp = new EmployeeCompensations();
+        emp.setEmployeeUuid(EMPLOYEE_ID);
+        emp.setPaymentMethod(PaymentMethod.DirectDeposit);
+
+        EmployeePaymentConfiguration config = new EmployeePaymentConfiguration();
+        config.setPaymentMethod(PaymentMethod.DirectDeposit.name());
+        config.setSplits(List.of(new Split(ROUTING, ACCOUNT)));
+
+        PayeeAccountEntity payeeAccount = new PayeeAccountEntity();
+        payeeAccount.setRtN(ROUTING);
+        payeeAccount.setAcctNo(ACCOUNT);
+
+        assertDoesNotThrow(() ->
+            reconcileService.reconcile(emp, config, List.of(payeeAccount))
+        );
+    }
+
+    @Test
+    void shouldThrowWhenSplitAccountDoesNotMatchAnyPayeeAccount() {
+        EmployeeCompensations emp = new EmployeeCompensations();
+        emp.setEmployeeUuid(EMPLOYEE_ID);
+        emp.setPaymentMethod(PaymentMethod.DirectDeposit);
+
+        EmployeePaymentConfiguration config = new EmployeePaymentConfiguration();
+        config.setPaymentMethod(PaymentMethod.DirectDeposit.name());
+        config.setSplits(List.of(new Split("000000000", "999999999")));
+
+        PayeeAccountEntity payeeAccount = new PayeeAccountEntity();
+        payeeAccount.setRtN(ROUTING);
+        payeeAccount.setAcctNo(ACCOUNT);
+
+        ProcessorException ex = assertThrows(ProcessorException.class, () ->
+            reconcileService.reconcile(emp, config, List.of(payeeAccount))
+        );
+
+        assertEquals(ErrorCode.GUSTO_BANK_ACCOUNT_NOT_FOUND_IN_PYRL, ex.getCode());
+    }
+
+    @Test
+    void shouldThrowWhenEmployeeIdIsNull() {
+        EmployeeCompensations emp = new EmployeeCompensations(); // No UUID
+        emp.setPaymentMethod(PaymentMethod.DirectDeposit);
+
+        EmployeePaymentConfiguration config = new EmployeePaymentConfiguration();
+        config.setPaymentMethod(PaymentMethod.DirectDeposit.name());
+        config.setSplits(List.of(new Split(ROUTING, ACCOUNT)));
+
+        assertThrows(ProcessorException.class, () ->
+            reconcileService.reconcile(emp, config, List.of())
+        );
+    }
+
+    @Test
+    void shouldThrowWhenSplitsAreEmpty() {
+        EmployeeCompensations emp = new EmployeeCompensations();
+        emp.setEmployeeUuid(EMPLOYEE_ID);
+        emp.setPaymentMethod(PaymentMethod.DirectDeposit);
+
+        EmployeePaymentConfiguration config = new EmployeePaymentConfiguration();
+        config.setPaymentMethod(PaymentMethod.DirectDeposit.name());
+        config.setSplits(Collections.emptyList());
+
+        assertThrows(ProcessorException.class, () ->
+            reconcileService.reconcile(emp, config, List.of())
+        );
+    }
+
+    @Test
+    void shouldThrowWhenPaymentMethodMismatch() {
+        EmployeeCompensations emp = new EmployeeCompensations();
+        emp.setEmployeeUuid(EMPLOYEE_ID);
+        emp.setPaymentMethod(PaymentMethod.Check);
+
+        EmployeePaymentConfiguration config = new EmployeePaymentConfiguration();
+        config.setPaymentMethod(PaymentMethod.DirectDeposit.name());
+        config.setSplits(List.of(new Split(ROUTING, ACCOUNT)));
+
+        assertThrows(ProcessorException.class, () ->
+            reconcileService.reconcile(emp, config, List.of())
+        );
+    }
+}
