@@ -431,3 +431,10 @@ class EmployeeTransactionMapperTest {
         assertTrue(ex.getMessage().contains("SPLIT_AMOUNT_TOTAL_MISMATCH"));
     }
 }
+Hi [Agility Lead’s Name] and [Manager’s Name],
+
+I’ve updated Sprint 248 with the latest status. The development and local testing for the Payroll Processed event have been completed, and I’ve moved the story to “Review.”
+
+Looking ahead, I anticipate the need for a follow-up testing story in the next sprint to validate the functionality in the dev environment. I recommend sizing it as a 2-pointer.
+
+Please let me know if there are any concerns or if further clarification is needed.
