@@ -313,3 +313,121 @@ class EmployeeTransactionUtilTest {
         return response;
     }
 }
+package net.jpmchase.payroll.processor.repository.mgmt.mapper;
+
+import net.jpmchase.payroll.processor.remote.gusto.model.payroll.*;
+import net.jpmchase.payroll.processor.repository.mgmt.entity.EmployeeTransactionEntity;
+import net.jpmchase.payroll.processor.repository.mgmt.entity.enums.PayrollStatus;
+import net.jpmchase.payroll.processor.steps.utils.EmployeeTransactionUtil;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.math.BigDecimal;
+import java.sql.Timestamp;
+import java.time.LocalDate;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+class EmployeeTransactionMapperTest {
+
+    private GetPayrollResponse response;
+    private EmployeeCompensations empComp;
+    private EmployeePaymentConfiguration config;
+    private final String srcPayrollId = "srcPayrollId";
+    private final String srcEventId = "srcEventId";
+    private final String payeeAccountId = "payeeAccountId";
+    private final String bankAccountUuid = "bankAccountUuid";
+
+    private Map<String, String> bankAccountToPayeeAccountMap;
+
+    @BeforeEach
+    void setup() {
+        empComp = new EmployeeCompensations();
+        empComp.setEmployeeUuid("emp-123");
+        empComp.setMemo("Memo Text");
+        empComp.setCheckAmount(new BigDecimal("250.75"));
+        empComp.setPaymentMethod(PaymentMethod.DirectDeposit);
+
+        response = new GetPayrollResponse();
+        response.setEmployeeCompensations(Collections.singletonList(empComp));
+        response.setProcessedDate(LocalDate.now().toString());
+
+        config = new EmployeePaymentConfiguration();
+        config.setEmployeeId("emp-123");
+        config.setSplitBy("PERCENTAGE");
+
+        Split split = new Split();
+        split.setSplitAmount("100");
+        split.setBankAccountUuid(bankAccountUuid);
+        config.setSplits(Collections.singletonList(split));
+
+        bankAccountToPayeeAccountMap = Map.of(bankAccountUuid, payeeAccountId);
+    }
+
+    @Test
+    void test_mapAllFrom_returnsTransactions() {
+        List<EmployeeTransactionEntity> result = EmployeeTransactionMapper.INSTANCE.mapAllFrom(
+            response, List.of(config), srcPayrollId, srcEventId, bankAccountToPayeeAccountMap
+        );
+
+        assertEquals(1, result.size());
+        EmployeeTransactionEntity txn = result.get(0);
+        assertEquals(srcEventId, txn.getSrcEvtId());
+        assertEquals(new BigDecimal("250.75"), txn.getTxnAm());
+        assertEquals(PayrollStatus.PENDING.getCode(), txn.getPayeeTxnStsCd());
+        assertEquals(payeeAccountId, txn.getPyrlPayeeAcctId());
+    }
+
+    @Test
+    void test_mapAllFrom_withEmptyEmployeeList_returnsEmptyList() {
+        response.setEmployeeCompensations(Collections.emptyList());
+        List<EmployeeTransactionEntity> result = EmployeeTransactionMapper.INSTANCE.mapAllFrom(
+            response, List.of(config), srcPayrollId, srcEventId, bankAccountToPayeeAccountMap
+        );
+        assertTrue(result.isEmpty());
+    }
+
+    @Test
+    void test_mapAllFrom_withNullCheckAmount_setsZeroTxnAm() {
+        empComp.setCheckAmount(null);
+        List<EmployeeTransactionEntity> result = EmployeeTransactionMapper.INSTANCE.mapAllFrom(
+            response, List.of(config), srcPayrollId, srcEventId, bankAccountToPayeeAccountMap
+        );
+        assertEquals(BigDecimal.ZERO, result.get(0).getTxnAm());
+    }
+
+    @Test
+    void test_mapAllFrom_withPaymentMethodNull_defaultsToCheckCalculation() {
+        empComp.setPaymentMethod(null);
+        List<EmployeeTransactionEntity> result = EmployeeTransactionMapper.INSTANCE.mapAllFrom(
+            response, List.of(config), srcPayrollId, srcEventId, bankAccountToPayeeAccountMap
+        );
+        assertNotNull(result.get(0).getTxnAm());
+    }
+
+    @Test
+    void test_mapAllFrom_setsDefaultAuditFields() {
+        List<EmployeeTransactionEntity> result = EmployeeTransactionMapper.INSTANCE.mapAllFrom(
+            response, List.of(config), srcPayrollId, srcEventId, bankAccountToPayeeAccountMap
+        );
+        EmployeeTransactionEntity txn = result.get(0);
+        assertEquals("SYSTEM_USER", txn.getCreUsrId());
+        assertEquals("SYSTEM_USER", txn.getUpdtUsrId());
+        assertNotNull(txn.getCreTs());
+        assertNotNull(txn.getUpdtTs());
+    }
+
+    @Test
+    void test_mapAllFrom_splitMismatch_throwsProcessorException() {
+        config.getSplits().get(0).setSplitAmount("50"); // Only 50% instead of 100%
+        Exception ex = assertThrows(RuntimeException.class, () -> {
+            EmployeeTransactionMapper.INSTANCE.mapAllFrom(
+                response, List.of(config), srcPayrollId, srcEventId, bankAccountToPayeeAccountMap
+            );
+        });
+        assertTrue(ex.getMessage().contains("SPLIT_AMOUNT_TOTAL_MISMATCH"));
+    }
+}
