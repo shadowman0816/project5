@@ -194,3 +194,55 @@ public class ReconcileEmployeePaymentInformationStep implements Step {
         log.info("[STEP] Reconcile with Employee Payment Configuration step completed for companyId={}", companyId);
     }
 }
+
+@Component("ReconcileAndMergeEmployeePaymentConfigurations")
+@RequiredArgsConstructor
+@Slf4j
+public class ReconcileEmployeePaymentInformationStep implements Step {
+
+    private final ReconcileEmployeePaymentService reconcileService;
+    private final PaymentConfigurationService paymentConfigurationService;
+    private final PayeeAccountRepository payeeAccountRepository;
+
+    @Override
+    public void execute(WorkflowContext context) {
+        GetPayrollResponse payrollResponse = context.get(GUSTO_SINGLE_PAYROLL, GetPayrollResponse.class);
+        EnrollmentEntity enrollmentEntity = context.get(COMPANY_ENROLLMENT, EnrollmentEntity.class);
+        String companyId = context.get(COMPANY_UUID, String.class);
+
+        if (payrollResponse.getEmployeeCompensations() == null) {
+            log.info("[STEP] Reconcile with Employee Payment Configuration step skipped for companyId={}", companyId);
+            return;
+        }
+
+        // For each employee
+        payrollResponse.getEmployeeCompensations().forEach(employeeComp -> {
+            String employeeId = employeeComp.getEmployeeUuid();
+
+            // 1. Fetch the employee-specific configuration
+            EmployeePaymentConfiguration config = paymentConfigurationService
+                    .getPaymentConfigurationsForAnEmployee(
+                            enrollmentEntity.getRelEntPrrtyId(), companyId, employeeId
+                    );
+
+            if (config == null || config.getSplits() == null) return;
+
+            // 2. Build the bankAccountUuid -> payrollPayeeAccountId map
+            Map<String, String> bankAccountToPayeeAccountMap = new HashMap<>();
+            for (EmployeePaymentConfiguration.Split split : config.getSplits()) {
+                String bankAccountUuid = split.getBankAccountUuid();
+                payeeAccountRepository.findBySourcePayeeId(bankAccountUuid).forEach(payeeAccount -> {
+                    bankAccountToPayeeAccountMap.put(bankAccountUuid, payeeAccount.getPayeeAccountId());
+                });
+            }
+
+            // 3. Store it in the context for downstream use (optional)
+            context.put("BANK_TO_PAYEE_MAP_" + employeeId, bankAccountToPayeeAccountMap);
+
+            // 4. Proceed with reconciliation
+            reconcileService.reconcile(employeeComp, config, companyId);
+        });
+
+        log.info("[STEP] Reconcile with Employee Payment Configuration step completed for companyId={}", companyId);
+    }
+}
