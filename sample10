@@ -85,3 +85,57 @@ public class EmployeeTransactionUtil {
         return transactions;
     }
 }
+import java.math.BigDecimal;
+import java.math.RoundingMode;
+import java.util.ArrayList;
+import java.util.List;
+
+public class EmployeeTransactionUtil {
+
+    public static List<EmployeeTransactionEntity> generateEmployeeTransactions(
+        String employeeId,
+        BigDecimal checkAmount,
+        String splitsBy, // "PERCENTAGE" or "AMOUNT"
+        List<EmployeePaymentSplit> splits,
+        String payrollId
+    ) {
+        List<EmployeeTransactionEntity> transactions = new ArrayList<>();
+        BigDecimal calculatedTotal = BigDecimal.ZERO;
+
+        for (EmployeePaymentSplit split : splits) {
+            BigDecimal splitAmount;
+
+            if ("PERCENTAGE".equalsIgnoreCase(splitsBy)) {
+                BigDecimal percentage = new BigDecimal(split.getSplitAmount());
+                splitAmount = checkAmount.multiply(percentage).divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP);
+            } else if ("AMOUNT".equalsIgnoreCase(splitsBy)) {
+                splitAmount = new BigDecimal(split.getSplitAmount());
+            } else {
+                throw new ProcessorException("Invalid splitsBy value for employeeId=" + employeeId + ": " + splitsBy);
+            }
+
+            calculatedTotal = calculatedTotal.add(splitAmount);
+
+            EmployeeTransactionEntity entity = new EmployeeTransactionEntity();
+            entity.setEmployeeId(employeeId);
+            entity.setPayrollId(payrollId);
+            entity.setTransactionAmount(splitAmount);
+            entity.setAccountNumber(split.getAccountNumber());
+            entity.setRoutingNumber(split.getRoutingNumber());
+            entity.setTransactionType("EMPLOYEE_PAYMENT");
+            entity.setStatus("PENDING");
+
+            transactions.add(entity);
+        }
+
+        // Validate that total equals original check amount within acceptable precision
+        if (calculatedTotal.subtract(checkAmount).abs().compareTo(BigDecimal.valueOf(0.01)) > 0) {
+            throw new ProcessorException(String.format(
+                "Split total mismatch for employeeId=%s: expected=%s, actual=%s",
+                employeeId, checkAmount, calculatedTotal
+            ));
+        }
+
+        return transactions;
+    }
+}
