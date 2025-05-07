@@ -239,4 +239,77 @@ void setup() {
 
     paymentConfigurations = Collections.singletonList(config);
 }
+@ExtendWith(MockitoExtension.class)
+class EmployeeTransactionUtilTest {
 
+    private static final String SRC_PAYROLL_ID = "srcPayroll123";
+    private static final String SRC_EVENT_ID = "event456";
+    private static final String EMPLOYEE_ID = "emp-123";
+    private static final String PAYEE_ACCT_ID = "payeeAcctId";
+    private static final String PROC_DATE = "2025-05-06";
+    private static final BigDecimal CHECK_AMT = new BigDecimal("1000.00");
+
+    @Test
+    void testGenerateEmployeeTransactions_withPercentageSplit() {
+        EmployeeCompensations emp = new EmployeeCompensations();
+        emp.setEmployeeUuid(EMPLOYEE_ID);
+        emp.setCheckAmount(CHECK_AMT);
+        emp.setPaymentMethod(PaymentMethod.DirectDeposit);
+
+        EmployeePaymentConfiguration config = new EmployeePaymentConfiguration();
+        config.setEmployeeId(EMPLOYEE_ID);
+        config.setSplitsBy("PERCENTAGE");
+
+        Split split = new Split();
+        split.setSplitAmount("50");
+        split.setBankAccountUuid("bank-123");
+
+        config.setSplits(List.of(split));
+
+        Map<String, String> map = Map.of("bank-123", PAYEE_ACCT_ID);
+
+        List<EmployeeTransactionEntity> txns = EmployeeTransactionUtil.generateEmployeeTransactions(
+                emp, config, map, PROC_DATE, SRC_PAYROLL_ID, SRC_EVENT_ID, CHECK_AMT
+        );
+
+        assertEquals(1, txns.size());
+        assertEquals(new BigDecimal("500.00"), txns.get(0).getTxnAm());
+    }
+
+    @Test
+    void testGenerateEmployeeTransactions_withMismatchAmount_throwsException() {
+        EmployeeCompensations emp = new EmployeeCompensations();
+        emp.setEmployeeUuid(EMPLOYEE_ID);
+        emp.setCheckAmount(CHECK_AMT);
+        emp.setPaymentMethod(PaymentMethod.DirectDeposit);
+
+        EmployeePaymentConfiguration config = new EmployeePaymentConfiguration();
+        config.setEmployeeId(EMPLOYEE_ID);
+        config.setSplitsBy("PERCENTAGE");
+
+        Split split1 = new Split();
+        split1.setSplitAmount("40");
+        split1.setBankAccountUuid("bank-1");
+
+        Split split2 = new Split();
+        split2.setSplitAmount("40");
+        split2.setBankAccountUuid("bank-2");
+
+        config.setSplits(List.of(split1, split2));
+        Map<String, String> map = Map.of("bank-1", "acct-1", "bank-2", "acct-2");
+
+        ProcessorException ex = assertThrows(ProcessorException.class, () ->
+            EmployeeTransactionMapper.INSTANCE.mapAllFrom(
+                createResponse(emp), List.of(config), SRC_PAYROLL_ID, SRC_EVENT_ID, map)
+        );
+
+        assertTrue(ex.getMessage().contains("SPLIT_AMOUNT_TOTAL_MISMATCH"));
+    }
+
+    private GetPayrollResponse createResponse(EmployeeCompensations emp) {
+        GetPayrollResponse response = new GetPayrollResponse();
+        response.setEmployeeCompensations(List.of(emp));
+        response.setProcessedDate(PROC_DATE);
+        return response;
+    }
+}
