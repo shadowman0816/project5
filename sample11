@@ -220,3 +220,23 @@ class ReconcileEmployeePaymentInformationStepTest {
         assertFalse(context.getKeys().contains("BANK_ACCOUNT_TO_PAYEE_ACCOUNT_MAP"));
     }
 }
+@BeforeEach
+void setup() {
+    empComp = new EmployeeCompensations();
+    empComp.setEmployeeUuid("emp-123");
+    empComp.setMemo("Memo Text");
+    empComp.setCheckAmount(new BigDecimal("250.75"));
+    empComp.setPaymentMethod(PaymentMethod.DirectDeposit);
+
+    response = new GetPayrollResponse();
+    response.setEmployeeCompensations(Collections.singletonList(empComp));
+    response.setProcessedDate(LocalDate.now().toString());
+
+    EmployeePaymentConfiguration config = new EmployeePaymentConfiguration();
+    config.setEmployeeId("emp-123");
+    config.setSplitBy("amount");
+    config.setSplits(Collections.emptyList()); // Or a real list if needed
+
+    paymentConfigurations = Collections.singletonList(config);
+}
+
