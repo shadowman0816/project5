@@ -1,0 +1,33 @@
+BigDecimal totalAllocated = BigDecimal.ZERO;
+List<EmployeeTransactionEntity> transactions = new ArrayList<>();
+
+for (EmployeePaymentConfiguration config : paymentConfigurations) {
+    String splitBy = config.getSplitBy();
+    BigDecimal splitValue = new BigDecimal(config.getSplitAmount());
+    BigDecimal amount;
+
+    if ("percentage".equalsIgnoreCase(splitBy)) {
+        amount = totalAmount.multiply(splitValue).divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP);
+    } else {
+        amount = splitValue;
+    }
+
+    totalAllocated = totalAllocated.add(amount);
+
+    transactions.add(buildTransaction(
+        procDate, srcPayrollId, employeeId, emp.getMemo(), amount,
+        PaymentMethod.DirectDeposit.equals(emp.getPaymentMethod()) ?
+            PayrollCalculationUtils.calculateDirectDepositEmployeeCompensation(response) :
+            PayrollCalculationUtils.calculateCheckEmployeeCompensation(response),
+        PayrollStatus.PENDING, srcEventId, emp.getPaymentMethod(), now
+    ));
+}
+
+// Final validation
+BigDecimal leftover = totalAmount.subtract(totalAllocated);
+if (leftover.compareTo(BigDecimal.ZERO) < 0) {
+    throw new IllegalArgumentException("Split total exceeds allocated amount");
+}
+if (leftover.compareTo(new BigDecimal("0.01")) > 0) {
+    throw new IllegalArgumentException("Unallocated remainder exists: " + leftover);
+}
