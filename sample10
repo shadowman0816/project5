@@ -139,3 +139,58 @@ public class EmployeeTransactionUtil {
         return transactions;
     }
 }
+@Component("ReconcileAndMergeEmployeePaymentConfigurations")
+@RequiredArgsConstructor
+@Slf4j
+public class ReconcileEmployeePaymentInformationStep implements Step {
+
+    private final ReconcileEmployeePaymentService reconcileService;
+    private final PayeeAccountRepository payeeAccountRepository;
+
+    @Override
+    public void execute(WorkflowContext context) {
+        GetPayrollResponse payrollResponse = context.get(GUSTO_SINGLE_PAYROLL, GetPayrollResponse.class);
+        EnrollmentEntity enrollmentEntity = context.get(COMPANY_ENROLLMENT, EnrollmentEntity.class);
+        String companyId = context.get(COMPANY_UUID, String.class);
+
+        if (payrollResponse.getEmployeeCompensations() == null) {
+            log.info("[STEP] Reconcile with Employee Payment configuration step skipped for companyId={}", companyId);
+            return;
+        }
+
+        Map<String, String> bankAccountUuidToPayeeAccountId = new ConcurrentHashMap<>();
+
+        payrollResponse.getEmployeeCompensations().forEach(employeeComp -> {
+            List<Split> splits = employeeComp.getSplits(); // Assuming this exists on EmployeeCompensations
+
+            // Fail if no splits (optional)
+            if (splits == null || splits.isEmpty()) {
+                throw new ProcessorException(EMPLOYEE_BANK_ACCOUNTS_NOT_FOUND_PYRL.getCode(),
+                        EMPLOYEE_BANK_ACCOUNTS_NOT_FOUND_PYRL.formatMessage(employeeComp.getEmployeeUuid()));
+            }
+
+            // Step 1: Reconcile
+            reconcileService.reconcile(employeeComp,
+                    enrollmentEntity.getRelEntPrtyId(),
+                    companyId,
+                    payrollResponse.getEmployeeCompensations());
+
+            // Step 2: Map bankAccountUuid -> payrollPayeeAccountId
+            for (Split split : splits) {
+                String bankAccountUuid = split.getBankAccountUuid();
+                Optional<PayeeAccountEntity> optionalPayeeAcct = payeeAccountRepository
+                        .findBySourcePayeeIdAndBankAccountUuid(employeeComp.getEmployeeUuid(), bankAccountUuid);
+
+                if (optionalPayeeAcct.isEmpty()) {
+                    throw new ProcessorException(EMPLOYEE_BANK_ACCOUNTS_NOT_FOUND_PYRL.getCode(),
+                            EMPLOYEE_BANK_ACCOUNTS_NOT_FOUND_PYRL.formatMessage(bankAccountUuid));
+                }
+
+                bankAccountUuidToPayeeAccountId.put(bankAccountUuid, optionalPayeeAcct.get().getId());
+            }
+        });
+
+        context.put(BANK_ACCOUNT_TO_PAYROLL_ACCOUNT_MAPPING, bankAccountUuidToPayeeAccountId);
+        log.info("[STEP] Reconcile with Employee Payment Configuration step completed for companyId={}", companyId);
+    }
+}
