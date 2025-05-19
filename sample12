@@ -1,0 +1,194 @@
+steps:
+  - name: SomeCriticalStep
+    retryEnabled: false
+    immediateRetryCount: 0
+
+@Getter
+@Setter
+public class StepConfig {
+    private String name;
+    private String executeOnCondition;
+    private String description;
+
+    private boolean disableRetry;
+    private boolean cancellable;
+
+    private Integer immediateRetryCount;
+    private Boolean retryEnabled;
+
+    private BackOffRetry backoffRetry;
+
+    @Getter
+    @Setter
+    public static class BackOffRetry {
+        private boolean enabled;
+        private int maxBackOffHours;
+        private String cutoffTime;
+    }
+}
+@Getter
+@Setter
+public class RetryConfigs {
+    private int maxRetryCount;
+    private int retryBackoffMillis;
+}
+@Getter
+@Setter
+@Configuration
+@ConfigurationProperties(prefix = "workflow")
+@Slf4j
+public class WorkFlowConfig {
+
+    private Boolean retryEnabled;
+    private RetryConfigs retryConfigs;
+    private Map<String, Map<String, List<StepConfig>>> groups = new ConcurrentHashMap<>();
+}
+int maxRetries = workFlowRegistry.resolveRetryCount(entityType, eventType, stepConfig);
+boolean retryEnabled = workFlowRegistry.resolveRetryEnabled(entityType, eventType, stepConfig);
+
+@Component
+@RequiredArgsConstructor
+@Slf4j
+public class WorkFlowRegistry {
+
+    private final WorkFlowConfig workFlowConfig;
+
+    public List<StepConfig> getStepsForEvent(String entityType, String eventType) {
+        return workFlowConfig.getGroups()
+            .getOrDefault(entityType, Collections.emptyMap())
+            .getOrDefault(eventType, Collections.emptyList());
+    }
+
+    public StepConfig getStepConfig(String entityType, String eventType, String stepName) {
+        return getStepsForEvent(entityType, eventType).stream()
+            .filter(s -> s.getName().equals(stepName))
+            .findFirst()
+            .orElse(null);
+    }
+
+    public int getRetryCountForStep(String entityType, String eventType) {
+        try {
+            return Optional.ofNullable(workFlowConfig.getRetryConfigs())
+                .map(WorkflowRetryConfig::getMaxRetryCount)
+                .orElse(0);
+        } catch (Exception e) {
+            log.warn("[REGISTRY] Fallback retry config missing at workflow level. Defaulting to 0 retries.");
+            return 0;
+        }
+    }
+
+    public int resolveRetryCount(String entityType, String eventType, StepConfig stepConfig) {
+        // 1. Step-level
+        if (stepConfig != null && stepConfig.getImmediateRetryCount() > 0) {
+            return stepConfig.getImmediateRetryCount();
+        }
+
+        // 2. Group-level
+        StepConfig groupLevel = getStepConfig(entityType, eventType, stepConfig.getName());
+        if (groupLevel != null && groupLevel.getImmediateRetryCount() > 0) {
+            return groupLevel.getImmediateRetryCount();
+        }
+
+        // 3. Workflow-level
+        return getRetryCountForStep(entityType, eventType);
+    }
+
+    public boolean resolveRetryEnabled(String entityType, String eventType, StepConfig stepConfig) {
+        if (Boolean.FALSE.equals(stepConfig.getRetryEnabled())) return false;
+        if (Boolean.TRUE.equals(stepConfig.getRetryEnabled())) return true;
+
+        StepConfig groupLevel = getStepConfig(entityType, eventType, stepConfig.getName());
+        if (groupLevel != null && Boolean.TRUE.equals(groupLevel.getRetryEnabled())) return true;
+
+        try {
+            return Optional.ofNullable(workFlowConfig.getRetryEnabled()).orElse(false);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+}
+if (maxRetries == 0) {
+    log.warn("[PROCESSOR] No retry config found for step '{}'. Defaulting to zero retries.", stepName);
+}
+private int getMaxRetryCount(StepConfig stepConfig, WorkFlowContext context) {
+    if (stepConfig.getImmediateRetryCount() > 0) {
+        return stepConfig.getImmediateRetryCount();
+    }
+
+    String entityType = context.getEvent().getMessageBody().getEntityType();
+    String eventType = context.getEvent().getMessageBody().getEventType();
+
+    StepConfig groupLevelConfig = workFlowRegistry.getStepConfig(entityType, eventType, stepConfig.getName());
+    if (groupLevelConfig != null && groupLevelConfig.getImmediateRetryCount() > 0) {
+        return groupLevelConfig.getImmediateRetryCount();
+    }
+
+    int workflowLevelRetry = workFlowRegistry.getRetryCountForStep(entityType, eventType);
+    return workflowLevelRetry > 0 ? workflowLevelRetry : 0;
+}
+private void executeStepWithRetry(StepConfig stepConfig, WorkFlowContext context) {
+    int retryCount = 0;
+    String stepName = stepConfig.getName();
+    log.info("[PROCESSOR] Executing step '{}' (Attempt {}/{}).", stepName, retryCount + 1, getMaxRetryCount(stepConfig, context));
+
+    Step stepExecutor = stepRegistry.get(stepName);
+    if (stepExecutor == null) {
+        log.warn("[PROCESSOR] Step '{}' not found in registry. Skipping.", stepName);
+        return;
+    }
+
+    if (!shouldExecute(stepConfig, context)) {
+        log.info("[PROCESSOR] Skipping step '{}' due to failed condition evaluation.", stepName);
+        return;
+    }
+
+    if (Boolean.FALSE.equals(stepConfig.getRetryEnabled())) {
+        // Explicitly opt out of retries
+        try {
+            context.setStatus(RUNNING);
+            stepExecutor.execute(context);
+            context.setStatus(SUCCESS);
+            log.info("[PROCESSOR] Step '{}' executed successfully (No retries).", stepName);
+        } catch (Exception e) {
+            context.setStatus(FAILED);
+            log.error("[PROCESSOR] Step '{}' failed. Retry disabled. Error: {}", stepName, e.getMessage());
+        }
+        return;
+    }
+
+    int maxRetries = getMaxRetryCount(stepConfig, context);
+    String failureReason = "";
+
+    while (retryCount < maxRetries) {
+        try {
+            context.setStatus(RUNNING);
+            stepExecutor.execute(context);
+            context.setStatus(SUCCESS);
+            log.info("[PROCESSOR] Step '{}' executed successfully on attempt {}/{}", stepName, retryCount + 1, maxRetries);
+            return;
+        } catch (Exception e) {
+            retryCount++;
+            failureReason = e.getMessage();
+            log.warn("[PROCESSOR] Step '{}' failed on attempt {}/{}. Retrying... Reason: {}", stepName, retryCount, maxRetries, failureReason);
+        }
+    }
+
+    // Schedule fallback retry if safEnabled=true
+    if (stepConfig.getBackoffRetry() != null && stepConfig.getBackoffRetry().isEnabled()) {
+        retryScheduleService.scheduleRetry(stepConfig, context, failureReason);
+    }
+
+    context.setStatus(FAILED);
+}
+if (stepConfig.isDisableRetry()) {
+    log.info("Retry explicitly disabled for step '{}'. Skipping retries.", stepName);
+    context.setStatus(FAILED);
+    return;
+}
+
+
+
+
+
+
+
