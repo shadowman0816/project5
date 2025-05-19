@@ -1,0 +1,101 @@
+@Slf4j
+@Service
+@RequiredArgsConstructor
+public class EventProcessorService {
+
+    private final WorkFlowRegistry workFlowRegistry;
+    private final StepRegistry stepRegistry;
+    private final ConditionRegistry conditionRegistry;
+    private final RetryScheduleService retryScheduleService;
+    private final EventAuditService auditService;
+
+    public void process(WorkFlowContext context) {
+        var message = context.getEvent().getMessageBody();
+        var entityType = message.getEntityType();
+        var eventType = message.getEventType();
+
+        log.info("[PROCESSOR] Starting workflow: {}.{}", entityType, eventType);
+        var stepConfigs = workFlowRegistry.getStepsForEvent(entityType, eventType);
+
+        for (StepConfig stepConfig : stepConfigs) {
+            try {
+                executeStepWithRetry(stepConfig, context, entityType, eventType);
+            } catch (Exception e) {
+                log.error("[PROCESSOR] Exception in step '{}': {}", stepConfig.getName(), e.getMessage(), e);
+                context.setStatus(FAILED);
+                break; // Optional: continue or stop on error
+            }
+
+            if (context.isStopped()) {
+                log.info("[PROCESSOR] Context marked as stopped. Halting further steps.");
+                break;
+            }
+        }
+
+        auditService.saveAudit(context);
+        log.info("[PROCESSOR] Completed processing for workflow: {}.{} with status={}", entityType, eventType, context.getStatus());
+    }
+
+    private void executeStepWithRetry(StepConfig stepConfig, WorkFlowContext context, String entityType, String eventType) {
+        String stepName = stepConfig.getName();
+        Step step = stepRegistry.get(stepName);
+
+        if (step == null) {
+            log.warn("[PROCESSOR] Step '{}' not registered. Skipping.", stepName);
+            return;
+        }
+
+        if (!shouldExecute(stepConfig, context)) {
+            log.info("[PROCESSOR] Skipping step '{}' due to conditional expression.", stepName);
+            return;
+        }
+
+        if (Boolean.FALSE.equals(stepConfig.getRetryEnabled())) {
+            log.info("[PROCESSOR] Retry disabled for step '{}'. Executing once only.", stepName);
+            try {
+                context.setStatus(RUNNING);
+                step.execute(context);
+                context.setStatus(SUCCESS);
+            } catch (Exception e) {
+                context.setStatus(FAILED);
+                log.error("[PROCESSOR] Step '{}' failed without retry. Reason: {}", stepName, e.getMessage());
+            }
+            return;
+        }
+
+        int maxRetries = workFlowRegistry.resolveRetryCount(entityType, eventType, stepConfig);
+        int retryCount = 0;
+        Exception lastException = null;
+
+        while (retryCount < maxRetries) {
+            try {
+                context.setStatus(RUNNING);
+                step.execute(context);
+                context.setStatus(SUCCESS);
+                log.info("[PROCESSOR] Step '{}' executed successfully on attempt {}/{}", stepName, retryCount + 1, maxRetries);
+                return;
+            } catch (Exception e) {
+                lastException = e;
+                retryCount++;
+                log.warn("[PROCESSOR] Step '{}' failed on attempt {}/{}. Retrying. Error: {}", stepName, retryCount, maxRetries, e.getMessage());
+            }
+        }
+
+        log.error("[PROCESSOR] Step '{}' failed after {} retries. Scheduling for retry if configured.", stepName, maxRetries);
+
+        // Schedule future retry if backoffRetry is enabled
+        if (stepConfig.getBackOffRetry() != null && stepConfig.getBackOffRetry().isEnabled()) {
+            retryScheduleService.scheduleRetry(stepConfig, context, lastException != null ? lastException.getMessage() : "Unknown failure");
+        }
+
+        context.setStatus(FAILED);
+    }
+
+    private boolean shouldExecute(StepConfig stepConfig, WorkFlowContext context) {
+        String condition = stepConfig.getExecuteOnCondition();
+        if (condition == null || condition.isBlank()) {
+            return true;
+        }
+        return conditionRegistry.evaluate(condition, context);
+    }
+}
