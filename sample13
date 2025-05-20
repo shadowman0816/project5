@@ -99,3 +99,60 @@ public class EventProcessorService {
         return conditionRegistry.evaluate(condition, context);
     }
 }
+@Mapper(componentModel = "spring", unmappedTargetPolicy = ReportingPolicy.IGNORE)
+public interface PayrollEntityMapper {
+
+    PayrollEntityMapper INSTANCE = Mappers.getMapper(PayrollEntityMapper.class);
+
+    default void mapAllFrom(final GetPayrollResponse response, final PayrollEntity existingPayrollEntity) {
+        List<EmployeeCompensations> compensations = Optional.ofNullable(response.getEmployeeCompensations())
+                .orElse(Collections.emptyList());
+
+        // Total gross pay
+        BigDecimal totalAmount = compensations.stream()
+                .map(EmployeeCompensations::getGrossPay)
+                .filter(Objects::nonNull)
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
+
+        // Total check amount
+        BigDecimal checkAmount = compensations.stream()
+                .map(EmployeeCompensations::getCheckAmount)
+                .filter(Objects::nonNull)
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
+
+        // Calculated compensation = fixed + hourly
+        BigDecimal calculatedAmount = compensations.stream()
+                .map(comp -> {
+                    BigDecimal fixed = Optional.ofNullable(comp.getFixedCompensations())
+                            .orElse(Collections.emptyList())
+                            .stream()
+                            .map(fc -> parseBigDecimal(fc.getAmount()))
+                            .reduce(BigDecimal.ZERO, BigDecimal::add);
+
+                    BigDecimal hourly = Optional.ofNullable(comp.getHourlyCompensations())
+                            .orElse(Collections.emptyList())
+                            .stream()
+                            .map(hc -> parseBigDecimal(hc.getHours())
+                                    .multiply(parseBigDecimal(hc.getAmount())))
+                            .reduce(BigDecimal.ZERO, BigDecimal::add);
+
+                    return fixed.add(hourly);
+                })
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
+
+        existingPayrollEntity.setPyrTlAmt(totalAmount);
+        existingPayrollEntity.setPyrChkAmt(checkAmount);
+        existingPayrollEntity.setPyrCalcAmt(calculatedAmount);
+        existingPayrollEntity.setPyrLStsCd(PayrollStatus.PENDING.getCode());
+        existingPayrollEntity.setUpdtUsrId(SYSTEM_USER);
+        existingPayrollEntity.setUpdtTs(Timestamp.from(Instant.now()));
+    }
+
+    private static BigDecimal parseBigDecimal(String value) {
+        try {
+            return new BigDecimal(Optional.ofNullable(value).orElse("0").trim());
+        } catch (NumberFormatException ex) {
+            return BigDecimal.ZERO;
+        }
+    }
+}
