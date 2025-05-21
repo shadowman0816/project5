@@ -366,4 +366,16 @@ public GroupConfig getGroupConfig(String entityType) {
         return workflowConfig.getGroups().get(entityType);
     }
     return null;
+}public boolean isSafEnabled(String entityType, String eventType, StepConfig stepConfig) {
+    if (stepConfig != null && stepConfig.getSafEnabled() != null) {
+        return stepConfig.getSafEnabled();
+    }
+
+    GroupConfig groupConfig = getGroupConfig(entityType, eventType);
+    if (groupConfig != null && groupConfig.getSafEnabled() != null) {
+        return groupConfig.getSafEnabled();
+    }
+
+    Boolean workflowLevelSaf = workFlowConfig.getSafEnabled();
+    return workflowLevelSaf != null && workflowLevelSaf;
 }
