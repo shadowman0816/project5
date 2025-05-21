@@ -1,0 +1,30 @@
+package net.jpmchase.payroll.processor.common.config;
+
+import lombok.Getter;
+import lombok.Setter;
+
+@Getter
+@Setter
+public class StepConfig {
+    private String name;
+    private String executeOnCondition;
+    private boolean retryEnabled = true;
+    private RetryConfig retryConfigs;
+    private boolean safEnabled = true;
+    private SafConfig safConfigs;
+
+    @Getter
+    @Setter
+    public static class RetryConfig {
+        private String retryBackoff;     // e.g., "100ms"
+        private int maxRetryCount;       // e.g., 3
+    }
+
+    @Getter
+    @Setter
+    public static class SafConfig {
+        private boolean enabled;
+        private int maxBackoffHours;     // e.g., 3
+        private String cutoffTime;       // e.g., "18:30"
+    }
+}
