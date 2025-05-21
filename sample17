@@ -361,3 +361,9 @@ public boolean isRetryEnabled(String entityType, String eventType, StepConfig st
 
     return true;
 }
+public GroupConfig getGroupConfig(String entityType) {
+    if (workflowConfig.getGroups() != null) {
+        return workflowConfig.getGroups().get(entityType);
+    }
+    return null;
+}
