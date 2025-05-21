@@ -1,0 +1,64 @@
+package net.jpmchase.payroll.processor.steps.payroll;
+
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import net.jpmchase.payroll.processor.model.entity.EnrollmentEntity;
+import net.jpmchase.payroll.processor.remote.gusto.model.payroll.GetPayrollResponse;
+import net.jpmchase.payroll.processor.service.PayrollService;
+import net.jpmchase.payroll.processor.steps.Step;
+import net.jpmchase.payroll.processor.utils.WorkflowContextUtil;
+import net.jpmchase.payroll.processor.context.WorkflowContext;
+import net.jpmchase.payroll.processor.exception.ProcessorException;
+import net.jpmchase.payroll.processor.exception.ProcessorExceptionType;
+import org.springframework.stereotype.Component;
+
+import java.time.*;
+import java.time.format.DateTimeFormatter;
+
+import static net.jpmchase.payroll.processor.utils.WorkflowContextUtil.*;
+
+@Component("CancelPayrollInGustoWhenValidationFailed")
+@RequiredArgsConstructor
+@Slf4j
+public class PayrollCancelStep implements Step {
+
+    private final PayrollService payrollService;
+
+    @Override
+    public void execute(WorkflowContext context) {
+        log.info("Attempting to cancel Payroll in Gusto due to validation failure.");
+
+        String payrollId = context.get(PAYRL_UUID, String.class);
+        String companyId = context.get(COMPANY_UUID, String.class);
+        GetPayrollResponse gustoResponse = context.get(GUSTO_PAYROLL_RESPONSE, GetPayrollResponse.class);
+        EnrollmentEntity enrollmentEntity = context.get(COMPANY_ENROLLMENT, EnrollmentEntity.class);
+
+        // Business rule 1: only cancel if payroll is in processed=true state
+        if (gustoResponse == null || !Boolean.TRUE.equals(gustoResponse.getProcessed())) {
+            log.warn("Skipping cancellation: Gusto payroll not in processed state.");
+            return;
+        }
+
+        // Business rule 2: Only cancel if current time is before 3:30pm PT on payroll deadline
+        LocalDateTime deadline = parseGustoDeadline(gustoResponse.getPayrollDeadline());
+        ZonedDateTime now = ZonedDateTime.now(ZoneId.of("America/Los_Angeles"));
+
+        ZonedDateTime cutoff = deadline.withHour(15).withMinute(30).withSecond(0).withNano(0).atZone(ZoneId.of("America/Los_Angeles"));
+        if (now.isAfter(cutoff)) {
+            log.warn("Skipping cancellation: current time {} is after 3:30pm PT deadline {}", now, cutoff);
+            return;
+        }
+
+        try {
+            payrollService.cancelPayroll(enrollmentEntity.getRelEntPtyId(), companyId, payrollId);
+            log.info("Successfully cancelled Payroll in Gusto for companyId={}, payrollId={}", companyId, payrollId);
+        } catch (Exception ex) {
+            // If it’s a transient infrastructure failure like timeout, JPA, Feign, etc. — wrap and rethrow as InfraRetryable
+            throw ProcessorException.of(ProcessorExceptionType.INFRA_RETRYABLE, "GUSTO_CANCEL_FAILED", "Failed to cancel Gusto payroll", ex);
+        }
+    }
+
+    private LocalDateTime parseGustoDeadline(String deadlineStr) {
+        return LocalDateTime.parse(deadlineStr, DateTimeFormatter.ISO_OFFSET_DATE_TIME);
+    }
+}
