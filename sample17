@@ -65,5 +65,92 @@ public class GroupConfig {
     private StepConfig.SafConfig safConfigs;
     private Map<String, List<StepConfig>> events;
 }
+package net.jpmchase.payroll.processor.registry;
 
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import net.jpmchase.payroll.processor.common.config.GroupConfig;
+import net.jpmchase.payroll.processor.common.config.StepConfig;
+import net.jpmchase.payroll.processor.common.config.WorkflowConfig;
+import org.springframework.stereotype.Component;
+
+import java.util.*;
+
+@Slf4j
+@Component
+@RequiredArgsConstructor
+public class WorkFlowRegistry {
+
+    private final WorkflowConfig workflowConfig;
+
+    public List<StepConfig> getStepsForEvent(String entityType, String eventType) {
+        GroupConfig groupConfig = workflowConfig.getGroups().get(entityType);
+        if (groupConfig == null) {
+            log.warn("No group config found for entityType '{}'", entityType);
+            return Collections.emptyList();
+        }
+
+        List<StepConfig> steps = groupConfig.getEvents().get(eventType);
+        if (steps == null) {
+            log.warn("No steps found for eventType '{}' in entityType '{}'", eventType, entityType);
+            return Collections.emptyList();
+        }
+
+        for (StepConfig step : steps) {
+            applyRetryConfig(step, groupConfig);
+            applySafConfig(step, groupConfig);
+        }
+
+        return steps;
+    }
+
+    private void applyRetryConfig(StepConfig step, GroupConfig groupConfig) {
+        if (!step.isRetryEnabled()) {
+            return; // Step explicitly disables retry
+        }
+
+        // Step-level retry config takes precedence
+        if (step.getRetryConfigs() == null) {
+            if (groupConfig.isRetryEnabled() && groupConfig.getRetryConfigs() != null) {
+                step.setRetryConfigs(groupConfig.getRetryConfigs());
+            } else if (workflowConfig.isRetryEnabled() && workflowConfig.getRetryConfigs() != null) {
+                step.setRetryConfigs(workflowConfig.getRetryConfigs());
+            }
+        }
+    }
+
+    private void applySafConfig(StepConfig step, GroupConfig groupConfig) {
+        if (!step.isSafEnabled()) {
+            return; // Step explicitly disables SAF/backoff
+        }
+
+        // Step-level SAF config takes precedence
+        if (step.getSafConfigs() == null) {
+            if (groupConfig.isSafEnabled() && groupConfig.getSafConfigs() != null) {
+                step.setSafConfigs(groupConfig.getSafConfigs());
+            } else if (workflowConfig.isSafEnabled() && workflowConfig.getSafConfigs() != null) {
+                step.setSafConfigs(workflowConfig.getSafConfigs());
+            }
+        }
+    }
+
+    public StepConfig getStepConfig(String entityType, String eventType, String stepName) {
+        return getStepsForEvent(entityType, eventType).stream()
+            .filter(step -> step.getName().equals(stepName))
+            .findFirst()
+            .orElse(null);
+    }
+
+    public int getRetryCountForStep(String entityType, String eventType, String stepName) {
+        StepConfig stepConfig = getStepConfig(entityType, eventType, stepName);
+        return stepConfig != null && stepConfig.getRetryConfigs() != null
+                ? stepConfig.getRetryConfigs().getMaxRetryCount()
+                : 0;
+    }
+
+    public StepConfig.SafConfig getSafConfig(String entityType, String eventType, String stepName) {
+        StepConfig stepConfig = getStepConfig(entityType, eventType, stepName);
+        return stepConfig != null ? stepConfig.getSafConfigs() : null;
+    }
+}
 
