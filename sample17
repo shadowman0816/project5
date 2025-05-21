@@ -339,3 +339,25 @@ public boolean isRetryEnabled(StepConfig stepConfig) {
     Boolean workflowRetryEnabled = workflowConfig.getRetryEnabled();
     return workflowRetryEnabled != null && workflowRetryEnabled;
 }
+public boolean isRetryEnabled(String entityType, String eventType, StepConfig stepConfig) {
+    // Step-level config (always present since primitive boolean)
+    if (!stepConfig.isRetryEnabled()) {
+        return false;
+    }
+
+    // Step-level says retry is enabled, now validate group and workflow level defaults
+    GroupConfig groupConfig = getGroupConfig(entityType);
+    if (groupConfig != null) {
+        Boolean groupRetry = groupConfig.isRetryEnabled();
+        if (groupRetry != null && !groupRetry) {
+            return false; // Group disables retry, overrides
+        }
+    }
+
+    Boolean workflowRetry = workflowConfig.isRetryEnabled();
+    if (workflowRetry != null && !workflowRetry) {
+        return false; // Workflow disables retry
+    }
+
+    return true;
+}
