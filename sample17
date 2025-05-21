@@ -321,3 +321,21 @@ public class EventProcessorService {
         return stepConfigs;
     }
 }
+public boolean isRetryEnabled(StepConfig stepConfig) {
+    // Step-level override
+    if (stepConfig.getRetryEnabled() != null) {
+        return stepConfig.getRetryEnabled();
+    }
+
+    // Group-level fallback
+    String entityType = stepConfig.getEntityType(); // You may need to pass this explicitly or attach to StepConfig
+    String eventType = stepConfig.getEventType();   // Same here
+    GroupConfig groupConfig = getGroupConfig(entityType);
+    if (groupConfig != null && groupConfig.getRetryEnabled() != null) {
+        return groupConfig.getRetryEnabled();
+    }
+
+    // Workflow-level fallback
+    Boolean workflowRetryEnabled = workflowConfig.getRetryEnabled();
+    return workflowRetryEnabled != null && workflowRetryEnabled;
+}
