@@ -28,3 +28,42 @@ public class StepConfig {
         private String cutoffTime;       // e.g., "18:30"
     }
 }
+package net.jpmchase.payroll.processor.common.config;
+
+import lombok.Getter;
+import lombok.Setter;
+import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.stereotype.Component;
+
+import java.util.Map;
+
+@Getter
+@Setter
+@Component
+@ConfigurationProperties(prefix = "workflow")
+public class WorkflowConfig {
+    private boolean retryEnabled;
+    private StepConfig.RetryConfig retryConfigs;
+    private boolean safEnabled;
+    private StepConfig.SafConfig safConfigs;
+    private Map<String, GroupConfig> groups;
+}
+package net.jpmchase.payroll.processor.common.config;
+
+import lombok.Getter;
+import lombok.Setter;
+
+import java.util.List;
+import java.util.Map;
+
+@Getter
+@Setter
+public class GroupConfig {
+    private boolean retryEnabled;
+    private StepConfig.RetryConfig retryConfigs;
+    private boolean safEnabled;
+    private StepConfig.SafConfig safConfigs;
+    private Map<String, List<StepConfig>> events;
+}
+
+
