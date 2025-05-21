@@ -1,0 +1,229 @@
+public enum ProcessorExceptionType {
+    FATAL,
+    BUSINESS_VALIDATION,
+    INFRA_RETRYABLE,
+    SKIPPABLE,
+    FLOW_HALT,
+    SILENT_WARNING
+}
+
+public class ProcessorException extends RuntimeException {
+    private final ProcessorExceptionType type;
+    private final String code;
+
+    public ProcessorException(ProcessorExceptionType type, String code, String message) {
+        super(message);
+        this.type = type;
+        this.code = code;
+    }
+
+    public ProcessorExceptionType getType() {
+        return type;
+    }
+
+    public String getCode() {
+        return code;
+    }
+}
+@Service
+@RequiredArgsConstructor
+@Slf4j
+public class EventProcessorService {
+
+    private final WorkFlowRegistry workFlowRegistry;
+    private final Map<String, Step> stepRegistry;
+    private final ConditionRegistry conditionRegistry;
+
+    @Autowired
+    private RetryScheduleService retryScheduleService;
+
+    @AuditableStepEvent
+    public void processEvent(Event event) {
+        final String eventId = String.valueOf(event.getMessageBody().getEventId());
+        MDC.put(GUSTO_EVENTID, eventId);
+        log.info("[PROCESSOR] Starting processing of event: {}", eventId);
+
+        WorkflowContext context = new WorkflowContext();
+        context.setStatus(INITIATED);
+        context.put(EVENT, event);
+
+        try {
+            for (StepConfig stepConfig : getStepsForEvent(event)) {
+                executeStepWithRetry(stepConfig, context);
+                if (context.getStatus() != SUCCESS) {
+                    break;
+                }
+            }
+            context.setStatus(COMPLETED);
+        } finally {
+            MDC.clear();
+            log.info("[PROCESSOR] Event processing completed for event: {}", eventId);
+        }
+    }
+
+    private Iterable<StepConfig> getStepsForEvent(final Event event) {
+        final String entityType = event.getMessageBody().getEntityType();
+        final String eventType = event.getMessageBody().getEventType();
+        List<StepConfig> stepConfigs = workFlowRegistry.getStepsForEvent(entityType, eventType);
+        if (stepConfigs.isEmpty()) {
+            log.warn("No workflow found for event '{}' and entity type '{}'. Skipping processing.",
+                event.getMessageBody().getEventType(), entityType);
+            return Collections.emptyList();
+        }
+        return stepConfigs;
+    }
+
+    private void executeStepWithRetry(StepConfig stepConfig, WorkflowContext context) {
+        int retryCount = 0;
+        String stepName = stepConfig.getName();
+        log.info("[PROCESSOR] Executing step '{}' (Attempt {}/{})", stepName, retryCount + 1, stepConfig.getImmediateRetryCount());
+
+        final Step stepExecutor = stepRegistry.get(stepName);
+        if (stepExecutor == null) {
+            log.warn("[PROCESSOR] Step '{}' not found in registry. Skipping.", stepName);
+            return;
+        }
+
+        if (!shouldExecute(stepConfig, context)) {
+            log.info("[PROCESSOR] Skipping step '{}' due to failed condition evaluation.", stepName);
+            return;
+        }
+
+        if (stepConfig.isDisableRetry()) {
+            try {
+                stepExecutor.execute(context);
+                context.setStatus(SUCCESS);
+                log.info("[PROCESSOR] Step '{}' executed successfully (No retries).", stepName);
+            } catch (Exception e) {
+                handleException(stepConfig, context, e, stepName, retryCount);
+            }
+            return;
+        }
+
+        while (retryCount < stepConfig.getImmediateRetryCount()) {
+            try {
+                stepExecutor.execute(context);
+                context.setStatus(SUCCESS);
+                log.info("[PROCESSOR] Step '{}' executed successfully on attempt {}/{}", stepName, retryCount + 1, stepConfig.getImmediateRetryCount());
+                return;
+            } catch (Exception e) {
+                retryCount++;
+                log.warn("[PROCESSOR] Step '{}' failed on attempt {}/{}. Retrying... Reason: {}",
+                    stepName, retryCount, stepConfig.getImmediateRetryCount(), e.getMessage());
+
+                if (retryCount >= stepConfig.getImmediateRetryCount()) {
+                    handleException(stepConfig, context, e, stepName, retryCount);
+                }
+            }
+        }
+    }
+
+    private void handleException(StepConfig stepConfig, WorkflowContext context, Exception e, String stepName, int retryCount) {
+        String failureReason = String.format("Step '%s' failed (Attempt %d/%d). Failure Reason: %s",
+            stepName, retryCount, stepConfig.getImmediateRetryCount(), e.getMessage());
+
+        if (e instanceof ProcessorException processorException) {
+            switch (processorException.getType()) {
+                case FATAL -> {
+                    context.setStatus(FAILED);
+                    log.error("[PROCESSOR] Fatal error: {}", processorException.getMessage());
+                }
+                case BUSINESS_VALIDATION -> {
+                    context.put("cancelPayroll", true);
+                    context.setStatus(SUCCESS);
+                    log.warn("[PROCESSOR] Business validation failed: {}", processorException.getMessage());
+                }
+                case INFRA_RETRYABLE -> {
+                    if (stepConfig.getBackoffRetry() != null && stepConfig.getBackoffRetry().isEnabled()) {
+                        retryScheduleService.scheduleRetry(stepConfig, context, failureReason);
+                    }
+                    context.setStatus(FAILED);
+                }
+                case SKIPPABLE -> {
+                    context.setStatus(SUCCESS);
+                    log.warn("[PROCESSOR] Skippable error occurred in step '{}': {}", stepName, processorException.getMessage());
+                }
+                case FLOW_HALT -> {
+                    context.setStatus(COMPLETED);
+                    log.info("[PROCESSOR] Flow halted intentionally in step '{}': {}", stepName, processorException.getMessage());
+                }
+                case SILENT_WARNING -> {
+                    context.setStatus(SUCCESS);
+                    log.warn("[PROCESSOR] Silent warning in step '{}': {}", stepName, processorException.getMessage());
+                }
+                default -> {
+                    context.setStatus(FAILED);
+                    log.error("[PROCESSOR] Unknown error type in step '{}'", stepName);
+                }
+            }
+        } else {
+            context.setStatus(FAILED);
+            log.error("[PROCESSOR] Unexpected error in step '{}'", stepName, e);
+        }
+    }
+
+    private boolean shouldExecute(StepConfig stepConfig, WorkflowContext context) {
+        String conditionName = stepConfig.getExecuteOnCondition();
+        if (conditionName == null || conditionName.equalsIgnoreCase("always")) {
+            return true;
+        }
+
+        try {
+            ExecutionCondition condition = conditionRegistry.get(conditionName);
+            if (condition == null) {
+                log.warn("[PROCESSOR] No condition bean found for '{}'. Skipping execution.", conditionName);
+                return false;
+            }
+            return condition.evaluate(context);
+        } catch (Exception e) {
+            log.error("[PROCESSOR] Failed to evaluate condition '{}'. Error: {}", conditionName, e.getMessage(), e);
+            return false;
+        }
+    }
+}
+public class ExceptionClassifierUtil {
+
+    public static boolean isInfraRetryable(Throwable ex) {
+        return ex instanceof SocketTimeoutException
+            || ex instanceof ConnectException
+            || ex instanceof UnknownHostException
+            || ex instanceof TimeoutException
+            || ex instanceof FeignException
+            || ex instanceof org.springframework.dao.DataAccessException
+            || ex instanceof javax.persistence.PersistenceException
+            || ex instanceof TransactionSystemException
+            || ex instanceof CannotCreateTransactionException
+            || ex instanceof SQLTransientException;
+    }
+
+    public static ProcessorException classify(Throwable ex, String stepName) {
+        if (isInfraRetryable(ex)) {
+            return new ProcessorException(
+                ProcessorExceptionType.INFRA_RETRYABLE,
+                "INFRA_RETRY",
+                "Step '%s' failed due to infrastructure issue: %s".formatted(stepName, ex.getMessage())
+            );
+        }
+
+        // Optional fallback
+        return new ProcessorException(
+            ProcessorExceptionType.FATAL,
+            "UNKNOWN_ERROR",
+            "Unhandled exception in step '%s': %s".formatted(stepName, ex.getMessage())
+        );
+    }
+}
+catch (Exception e) {
+    retryCount++;
+    log.warn("[PROCESSOR] Step '{}' failed on attempt {}/{}. Retrying... Reason: {}", 
+             stepName, retryCount, stepConfig.getImmediateRetryCount(), e.getMessage());
+
+    if (retryCount >= stepConfig.getImmediateRetryCount()) {
+        ProcessorException classified = (e instanceof ProcessorException pe) 
+            ? pe 
+            : ExceptionClassifierUtil.classify(e, stepName);
+
+        handleException(stepConfig, context, classified, stepName, retryCount);
+    }
+}
+
