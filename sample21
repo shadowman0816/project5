@@ -1,0 +1,88 @@
+@ExtendWith(MockitoExtension.class)
+class RetryScheduleServiceTest {
+
+    @Mock
+    private RetryOutboxRepository retryOutboxRepository;
+
+    @InjectMocks
+    private RetryScheduleService retryScheduleService;
+
+    @Mock
+    private StepConfig stepConfig;
+
+    @Mock
+    private StepConfig.SafConfig safConfig;
+
+    @Mock
+    private WorkflowContext context;
+
+    @Mock
+    private Event event;
+
+    private static final String FAILURE_REASON = "Some error occurred";
+    private static final String STEP_NAME = "retryStep";
+    private static final UUID EVENT_ID = UUID.randomUUID();
+
+    @BeforeEach
+    void setup() {
+        when(stepConfig.getName()).thenReturn(STEP_NAME);
+        when(context.get("event", Event.class)).thenReturn(event);
+        when(event.getMessageBody()).thenReturn(new MessageBody() {{
+            setEventId(EVENT_ID);
+            setEntityType("PAYROLL");
+        }});
+    }
+
+    @Test
+    void testRetryDisabled_skipsRetry() {
+        when(stepConfig.getSafConfigs()).thenReturn(safConfig);
+        when(stepConfig.isSafEnabled()).thenReturn(false);
+
+        retryScheduleService.scheduleRetry(stepConfig, context, FAILURE_REASON);
+
+        verifyNoInteractions(retryOutboxRepository);
+    }
+
+    @Test
+    void testCutoffTimeReached_skipsRetry() {
+        when(stepConfig.getSafConfigs()).thenReturn(safConfig);
+        when(stepConfig.isSafEnabled()).thenReturn(true);
+        when(safConfig.getCutoffTime()).thenReturn(LocalTime.now().minusMinutes(1).toString());
+
+        retryScheduleService.scheduleRetry(stepConfig, context, FAILURE_REASON);
+
+        verifyNoInteractions(retryOutboxRepository);
+    }
+
+    @Test
+    void testNewRetryCreated_whenNoExistingFound() {
+        when(stepConfig.getSafConfigs()).thenReturn(safConfig);
+        when(stepConfig.isSafEnabled()).thenReturn(true);
+        when(safConfig.getCutoffTime()).thenReturn(LocalTime.now().plusMinutes(5).toString());
+        when(safConfig.getMaxBackoffHours()).thenReturn(3);
+        when(retryOutboxRepository.findByEventIdAndStepName(EVENT_ID.toString(), STEP_NAME))
+            .thenReturn(Optional.empty());
+
+        retryScheduleService.scheduleRetry(stepConfig, context, FAILURE_REASON);
+
+        verify(retryOutboxRepository, times(1)).save(any(RetryOutboxEntity.class));
+    }
+
+    @Test
+    void testExistingRetryUpdated_whenFound() {
+        RetryOutboxEntity existing = new RetryOutboxEntity();
+        existing.setRetryCount(1);
+
+        when(stepConfig.getSafConfigs()).thenReturn(safConfig);
+        when(stepConfig.isSafEnabled()).thenReturn(true);
+        when(safConfig.getCutoffTime()).thenReturn(LocalTime.now().plusMinutes(5).toString());
+        when(safConfig.getMaxBackoffHours()).thenReturn(3);
+        when(retryOutboxRepository.findByEventIdAndStepName(EVENT_ID.toString(), STEP_NAME))
+            .thenReturn(Optional.of(existing));
+
+        retryScheduleService.scheduleRetry(stepConfig, context, FAILURE_REASON);
+
+        assertEquals(2, existing.getRetryCount());
+        verify(retryOutboxRepository).save(existing);
+    }
+}
