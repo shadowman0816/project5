@@ -1,0 +1,295 @@
+INSERT INTO pyrl_mgmt.payroll_audit (
+  sbmt_prty_ol_prfl_id, sbmt_ts, aprvr_prty_ol_prfl_id, aprv_ts, 
+  cncl_prty_ol_prfl_id, cncl_ts, lmt_am, seg_cd, lmt_type_cd, 
+  pyrl_dlvr_type_cd, err_cd, err_desc_tx, src_pay_schd_id, 
+  app_id, sess_id, chnl_id, src_evt_id, src_pyrl_am, src_chk_am,
+  calc_prty_entp_prty_id, sbmt_prty_entp_prty_id, aprvr_prty_entp_prty_id, 
+  cncl_prty_entp_prty_id, src_pymt_instr_id, clnt_ref_nb, cre_usr_id, updt_usr_id, updt_ts
+) VALUES (
+  :sbmtPrtyOlPrflId, :sbmtTs, :aprvrPrtyOlPrflId, :aprvTs, 
+  :cnclPrtyOlPrflId, :cnclTs, :lmtAm, :segCd, :lmtTypeCd, 
+  :pyrlDlvrTypeCd, :errCd, :errDescTx, :srcPaySchdId, 
+  :appId, :sessId, :chnlId, :srcEvtId, :srcPyrlAm, :srcChkAm,
+  :calcPrtyEntpPrtyId, :sbmtPrtyEntpPrtyId, :aprvrPrtyEntpPrtyId, 
+  :cnclPrtyEntpPrtyId, :srcPymtInstrId, :clntRefNb, :creUsrId, :updtUsrId, :updtTs
+)
+
+
+@Modifying
+@Query(value = SQLQueries.PAYROLL_AUDIT_INSERT, nativeQuery = true)
+void insertPayrollAudit(@Param("sbmtPrtyOlPrflId") Long sbmtPrtyOlPrflId,
+                        @Param("sbmtTs") Timestamp sbmtTs,
+                        @Param("aprvrPrtyOlPrflId") Long aprvrPrtyOlPrflId,
+                        @Param("aprvTs") Timestamp aprvTs,
+                        @Param("cnclPrtyOlPrflId") Long cnclPrtyOlPrflId,
+                        @Param("cnclTs") Timestamp cnclTs,
+                        @Param("lmtAm") BigDecimal lmtAm,
+                        @Param("segCd") String segCd,
+                        @Param("lmtTypeCd") String lmtTypeCd,
+                        @Param("pyrlDlvrTypeCd") String pyrlDlvrTypeCd,
+                        @Param("errCd") String errCd,
+                        @Param("errDescTx") String errDescTx,
+                        @Param("srcPaySchdId") String srcPaySchdId,
+                        @Param("appId") String appId,
+                        @Param("sessId") String sessId,
+                        @Param("chnlId") String chnlId,
+                        @Param("srcEvtId") String srcEvtId,
+                        @Param("srcPyrlAm") BigDecimal srcPyrlAm,
+                        @Param("srcChkAm") BigDecimal srcChkAm,
+                        @Param("calcPrtyEntpPrtyId") String calcPrtyEntpPrtyId,
+                        @Param("sbmtPrtyEntpPrtyId") String sbmtPrtyEntpPrtyId,
+                        @Param("aprvrPrtyEntpPrtyId") String aprvrPrtyEntpPrtyId,
+                        @Param("cnclPrtyEntpPrtyId") String cnclPrtyEntpPrtyId,
+                        @Param("srcPymtInstrId") String srcPymtInstrId,
+                        @Param("clntRefNb") String clntRefNb,
+                        @Param("creUsrId") String creUsrId,
+                        @Param("updtUsrId") String updtUsrId,
+                        @Param("updtTs") Timestamp updtTs);
+
+
+@Component
+@RequiredArgsConstructor
+public class PayrollAuditPersistenceUtil {
+
+    private final PayrollAuditRepository payrollAuditRepository;
+
+    public void insert(PayrollAuditEntity entity) {
+        payrollAuditRepository.insertPayrollAudit(
+            entity.getSbmtPrtyOlPrflId(),
+            entity.getSbmtTs(),
+            entity.getAprvrPrtyOlPrflId(),
+            entity.getAprvTs(),
+            entity.getCnclPrtyOlPrflId(),
+            entity.getCnclTs(),
+            entity.getLmtAm(),
+            entity.getSegCd(),
+            entity.getLmtTypeCd(),
+            entity.getPyrlDlvrTypeCd(),
+            entity.getErrCd(),
+            entity.getErrDescTx(),
+            entity.getSrcPaySchdId(),
+            entity.getAppId(),
+            entity.getSessId(),
+            entity.getChnlId(),
+            entity.getSrcEvtId(),
+            entity.getSrcPyrlAm(),
+            entity.getSrcChkAm(),
+            entity.getCalcPrtyEntpPrtyId(),
+            entity.getSbmtPrtyEntpPrtyId(),
+            entity.getAprvrPrtyEntpPrtyId(),
+            entity.getCnclPrtyEntpPrtyId(),
+            entity.getSrcPymtInstrId(),
+            entity.getClntRefNb(),
+            entity.getCreUsrId(),
+            entity.getUpdtUsrId(),
+            entity.getUpdtTs()
+        );
+    }
+}
+
+
+@Override
+public PayrollEntity saveWithAudit(PayrollEntity payrollEntity) {
+    PayrollAuditEntity auditEntity = convertToAuditEntity(payrollEntity);
+    payrollAuditPersistenceUtil.insert(auditEntity); // new native insert
+    return payrollEntity;
+}
+
+UPDATE pyrl_mgmt.pyrl
+SET
+    lmt_am = :lmtAm,
+    lmt_type_cd = :lmtTypeCd,
+    seg_cd = :segCd,
+    proc_dt = :procDt,
+    hist_in = :histIn,
+    src_chk_am = :srcChkAm,
+    src_pyrl_am = :srcPyrlAm,
+    pyrl_sts_cd = :pyrlStsCd,
+    updt_usr_id = :updtUsrId,
+    updt_ts = :newUpdtTs
+WHERE
+    src_pyrl_id = :srcPyrlId
+    AND proc_dt = :procDt
+    AND hist_in = 'N'
+    AND updt_ts = :currentUpdtTs;
+
+
+public static final String PAYROLL_UPDATE_FOR_PROCESSED_EVENT = """
+    UPDATE pyrl_mgmt.pyrl
+    SET lmt_am = :lmtAm,
+        lmt_type_cd = :lmtTypeCd,
+        seg_cd = :segCd,
+        proc_dt = :procDt,
+        hist_in = :histIn,
+        src_chk_am = :srcChkAm,
+        src_pyrl_am = :srcPyrlAm,
+        pyrl_sts_cd = :pyrlStsCd,
+        updt_usr_id = :updtUsrId,
+        updt_ts = :newUpdtTs
+    WHERE src_pyrl_id = :srcPyrlId
+      AND proc_dt = :procDt
+      AND hist_in = 'N'
+      AND updt_ts = :currentUpdtTs
+""";
+
+@Modifying
+@Transactional
+@Query(value = SQLQueries.PAYROLL_UPDATE_FOR_PROCESSED_EVENT, nativeQuery = true)
+int updatePayrollProcessedEvent(
+    @Param("lmtAm") BigDecimal lmtAm,
+    @Param("lmtTypeCd") String lmtTypeCd,
+    @Param("segCd") String segCd,
+    @Param("procDt") Timestamp procDt,
+    @Param("histIn") String histIn,
+    @Param("srcChkAm") BigDecimal srcChkAm,
+    @Param("srcPyrlAm") BigDecimal srcPyrlAm,
+    @Param("pyrlStsCd") String pyrlStsCd,
+    @Param("updtUsrId") String updtUsrId,
+    @Param("newUpdtTs") Timestamp newUpdtTs,
+    @Param("srcPyrlId") String srcPyrlId,
+    @Param("currentUpdtTs") Timestamp currentUpdtTs
+);
+
+@Override
+public PayrollEntity saveWithAudit(PayrollEntity payrollEntity) {
+    // Convert to audit and save
+    final PayrollAuditEntity auditEntity = convertToAuditEntity(payrollEntity);
+    payrollAuditRepository.save(auditEntity);
+
+    // Perform native update with optimistic locking
+    int updatedRows = payrollRepository.updatePayrollProcessedEvent(
+        payrollEntity.getLmtAm(),
+        payrollEntity.getLmtTypeCd(),
+        payrollEntity.getSegCd(),
+        payrollEntity.getId().getProcDt(),
+        payrollEntity.getId().getHistIn(),
+        payrollEntity.getSrcChkAm(),
+        payrollEntity.getSrcPyrlAm(),
+        payrollEntity.getPyrlStsCd(),
+        payrollEntity.getUpdtUsrId(),
+        Timestamp.from(Instant.now()), // new update TS
+        payrollEntity.getId().getSrcPyrlId(),
+        payrollEntity.getUpdtTs()      // optimistic locking check
+    );
+
+    if (updatedRows == 0) {
+        throw new OptimisticLockException("Failed to update payrollEntity — record may have been modified by another transaction.");
+    }
+
+    return payrollEntity;
+}
+
+package net.jpmchase.payroll.processor.utils;
+
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.OptimisticLockingFailureException;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.sql.Timestamp;
+
+@Slf4j
+public class PayrollUpdateUtil {
+
+    private static final int MAX_RETRIES = 3;
+
+    @Transactional
+    public static boolean updatePayrollWithRetry(
+            PayrollRepository payrollRepository,
+            PayrollEntity entity,
+            String updateQueryIdentifier // Optional if using dynamic SQL keys
+    ) {
+        int attempt = 0;
+        while (attempt < MAX_RETRIES) {
+            attempt++;
+            int rowsUpdated = payrollRepository.updateForPayrollProcessedEvent(
+                    entity.getId().getSrcPyrId(),
+                    entity.getAcctStsCd(),
+                    entity.getUpdtUsrId(),
+                    entity.getUpdtTs(),
+                    entity.getUpdtTs() // currentUpdtTs
+            );
+
+            if (rowsUpdated > 0) {
+                log.info("✅ Payroll updated successfully on attempt {}", attempt);
+                return true;
+            }
+
+            log.warn("⚠️ Update attempt {} failed due to zero rows affected (likely optimistic lock). Retrying...", attempt);
+        }
+
+        throw new OptimisticLockingFailureException("Exceeded retry attempts while updating payroll entity: " + entity.getId());
+    }
+}
+
+@Override
+public PayrollEntity saveWithAudit(PayrollEntity payrollEntity) {
+    final PayrollAuditEntity payrollAuditEntity = convertToAuditEntity(payrollEntity);
+    payrollAuditRepository.save(payrollAuditEntity);
+
+    boolean updated = PayrollUpdateUtil.updatePayrollWithRetry(
+        payrollRepository,
+        payrollEntity,
+        SQLQueries.PAYROLL_UPDATE_FOR_PROCESSED_EVENT
+    );
+
+    if (!updated) {
+        throw new RuntimeException("Failed to update payroll entity after retries: " + payrollEntity.getId());
+    }
+
+    return payrollEntity;
+}
+
+@Transactional
+public void persist(
+    final GetPayrollResponse source,
+    final WorkflowContext context,
+    final String srcEventId,
+    final String srcPayrollId,
+    final Map<String, String> bankAccountToPayrollAccountMap
+) {
+    final int MAX_RETRIES = 3;
+    int attempt = 0;
+    boolean updated = false;
+
+    while (attempt < MAX_RETRIES && !updated) {
+        attempt++;
+        PayrollEntity payrollEntity = payrollPersistenceService.findBySrcPayrollId(srcPayrollId)
+            .orElseThrow(() -> new ProcessorException(
+                ProcessorExceptionType.FATAL,
+                PAYROLL_RECORD_NOT_FOUND.getCode()
+            ));
+
+        // Re-map to update values from response
+        PayrollEntityMapper.INSTANCE.mapAllFrom(source, context, payrollEntity);
+
+        try {
+            payrollPersistenceService.saveWithAudit(payrollEntity);
+            updated = true;
+        } catch (OptimisticLockingFailureException ex) {
+            log.warn("⚠️ Attempt {}: Failed to persist PayrollEntity due to optimistic locking. Retrying...", attempt);
+            if (attempt == MAX_RETRIES) {
+                log.error("❌ Max retries exceeded for PayrollEntity save. Failing permanently.");
+                throw ex;
+            }
+        }
+    }
+
+    // Persist PayrollTransactionEntities
+    List<PayrollTransactionEntity> transactionEntities =
+        PayrollTransactionEntityMapper.INSTANCE.mapAllFrom(
+            source, srcEventId, srcPayrollId,
+            payrollOptionsConfiguration.getPayrollOmnibusAcctId()
+        );
+    payrollTransactionPersistenceService.saveAllWithAudit(transactionEntities);
+
+    // Persist EmployeeTransactionEntities
+    List<EmployeePaymentConfiguration> paymentConfigurations =
+        paymentConfigurationService.getPaymentConfigurationsForAllEmployees(
+            actorEntPrtyId, UUID.fromString(source.getCompanyUuid())
+        );
+    List<EmployeeTransactionEntity> employeeTransactions =
+        EmployeeTransactionMapper.INSTANCE.mapAllFrom(
+            source, paymentConfigurations, bankAccountToPayrollAccountMap
+        );
+    employeeTransactionPersistenceService.saveAllWithAudit(employeeTransactions);
+}
