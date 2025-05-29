@@ -330,3 +330,21 @@ int updatePayrollProcessedEvent(
     @Param("srcPyrlId") String srcPyrlId,
     @Param("currentUpdtTs") Timestamp currentUpdtTs
 );
+public class PayrollCloneUtil {
+
+    public static PayrollEntity cloneShallow(PayrollEntity original) {
+        PayrollEntity clone = new PayrollEntity();
+
+        clone.setLmtAm(original.getLmtAm());
+        clone.setLmtTypeCd(original.getLmtTypeCd());
+        clone.setSegCd(original.getSegCd());
+        clone.setSrcChkAm(original.getSrcChkAm());
+        clone.setSrcPyrLAm(original.getSrcPyrLAm());
+        clone.setPyrLStsCd(original.getPyrLStsCd());
+        clone.setUpdtUsrId(original.getUpdtUsrId());
+        clone.setId(original.getId()); // EmbeddedId
+        clone.setUpdtTs(original.getUpdtTs());
+
+        return clone;
+    }
+}
