@@ -1,88 +1,120 @@
-@ExtendWith(MockitoExtension.class)
-class RetryScheduleServiceTest {
+package net.jpmchase.payroll.processor.steps.payroll;
 
-    @Mock
-    private RetryOutboxRepository retryOutboxRepository;
+import net.jpmchase.payroll.processor.common.context.WorkflowContext;
+import net.jpmchase.payroll.processor.enums.ProcessorExceptionType;
+import net.jpmchase.payroll.processor.exception.ProcessorException;
+import net.jpmchase.payroll.processor.model.GetPayrollResponse;
+import net.jpmchase.payroll.processor.model.entity.EnrollmentEntity;
+import net.jpmchase.payroll.processor.model.entity.PayrollEntity;
+import net.jpmchase.payroll.processor.model.limits.ProfileLimit;
+import net.jpmchase.payroll.processor.model.response.PaymentCustomerEligibilityResponse;
+import net.jpmchase.payroll.processor.repository.ContractorPaymentGroupRepository;
+import net.jpmchase.payroll.processor.repository.PayrollRepository;
+import net.jpmchase.payroll.processor.service.CustomerConfigurationService;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
-    @InjectMocks
-    private RetryScheduleService retryScheduleService;
+import java.math.BigDecimal;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
 
-    @Mock
-    private StepConfig stepConfig;
+import static net.jpmchase.payroll.processor.common.constants.ContextConstants.*;
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
 
-    @Mock
-    private StepConfig.SafConfig safConfig;
+public class CustomerInternalEligibilityValidationStepTest {
 
-    @Mock
+    private CustomerInternalEligibilityValidationStep step;
+    private CustomerConfigurationService customerConfigurationService;
+    private PayrollRepository payrollRepository;
+    private ContractorPaymentGroupRepository contractorPaymentGroupRepository;
+
     private WorkflowContext context;
 
-    @Mock
-    private Event event;
-
-    private static final String FAILURE_REASON = "Some error occurred";
-    private static final String STEP_NAME = "retryStep";
-    private static final UUID EVENT_ID = UUID.randomUUID();
-
     @BeforeEach
-    void setup() {
-        when(stepConfig.getName()).thenReturn(STEP_NAME);
-        when(context.get("event", Event.class)).thenReturn(event);
-        when(event.getMessageBody()).thenReturn(new MessageBody() {{
-            setEventId(EVENT_ID);
-            setEntityType("PAYROLL");
-        }});
+    void setUp() {
+        customerConfigurationService = mock(CustomerConfigurationService.class);
+        payrollRepository = mock(PayrollRepository.class);
+        contractorPaymentGroupRepository = mock(ContractorPaymentGroupRepository.class);
+        step = new CustomerInternalEligibilityValidationStep(customerConfigurationService, payrollRepository, contractorPaymentGroupRepository);
+
+        context = new WorkflowContext();
     }
 
     @Test
-    void testRetryDisabled_skipsRetry() {
-        when(stepConfig.getSafConfigs()).thenReturn(safConfig);
-        when(stepConfig.isSafEnabled()).thenReturn(false);
-
-        retryScheduleService.scheduleRetry(stepConfig, context, FAILURE_REASON);
-
-        verifyNoInteractions(retryOutboxRepository);
+    void shouldSkipStepWhenCancelFlagIsSet() {
+        context.put(CANCEL_GUSTO_PAYROLL, true);
+        step.execute(context);
+        // No exception = success
     }
 
     @Test
-    void testCutoffTimeReached_skipsRetry() {
-        when(stepConfig.getSafConfigs()).thenReturn(safConfig);
-        when(stepConfig.isSafEnabled()).thenReturn(true);
-        when(safConfig.getCutoffTime()).thenReturn(LocalTime.now().minusMinutes(1).toString());
+    void shouldPassValidationWhenTotalAmountWithinLimit() {
+        UUID companyId = UUID.randomUUID();
+        UUID payrollId = UUID.randomUUID();
+        String profileId = "profile-123";
 
-        retryScheduleService.scheduleRetry(stepConfig, context, FAILURE_REASON);
+        EnrollmentEntity enrollmentEntity = new EnrollmentEntity();
+        GetPayrollResponse payrollResponse = new GetPayrollResponse();
+        PayrollEntity payrollEntity = new PayrollEntity();
 
-        verifyNoInteractions(retryOutboxRepository);
+        context.put(COMPANY_UUID, companyId.toString());
+        context.put(PYRL_UUID, payrollId.toString());
+        context.put(PYRL_EMPLOYEE_TXN_ID, UUID.randomUUID().toString());
+        context.put(SRC_PAYEE_ID, UUID.randomUUID().toString());
+        context.put(COMPANY_ENROLLMENT, enrollmentEntity);
+        context.put(SRC_GUSTO_SINGLE_PAYROLL, payrollResponse);
+        context.put(PYRL_ENTITY, payrollEntity);
+
+        PaymentCustomerEligibilityResponse eligibilityResponse = new PaymentCustomerEligibilityResponse();
+        ProfileLimit profileLimit = mock(ProfileLimit.class);
+
+        when(customerConfigurationService.validateProfileAccountAndLimit(any(), anyString(), anyString()))
+                .thenReturn(eligibilityResponse);
+        when(customerConfigurationService.getLimit(any(ProfileLimit.class))).thenReturn(new BigDecimal("1000.00"));
+        when(payrollRepository.findTotalPayrollByEnrEnIdAndProcessDate(any(), any())).thenReturn(List.of(BigDecimal.ZERO));
+        when(payrollEntity.getProcessedDate()).thenReturn("2025-05-30");
+        when(payrollResponse.getTotals()).thenReturn(Map.of("companyDebit", new BigDecimal("250.00")));
+        when(eligibilityResponse.getProfileLimit()).thenReturn(profileLimit);
+        when(profileLimit.getProfileId()).thenReturn(profileId);
+        when(payrollEntity.getEntPrptyId()).thenReturn("some-entity");
+
+        assertDoesNotThrow(() -> step.execute(context));
     }
 
     @Test
-    void testNewRetryCreated_whenNoExistingFound() {
-        when(stepConfig.getSafConfigs()).thenReturn(safConfig);
-        when(stepConfig.isSafEnabled()).thenReturn(true);
-        when(safConfig.getCutoffTime()).thenReturn(LocalTime.now().plusMinutes(5).toString());
-        when(safConfig.getMaxBackoffHours()).thenReturn(3);
-        when(retryOutboxRepository.findByEventIdAndStepName(EVENT_ID.toString(), STEP_NAME))
-            .thenReturn(Optional.empty());
+    void shouldThrowExceptionWhenLimitExceeded() {
+        UUID companyId = UUID.randomUUID();
+        UUID payrollId = UUID.randomUUID();
 
-        retryScheduleService.scheduleRetry(stepConfig, context, FAILURE_REASON);
+        EnrollmentEntity enrollmentEntity = new EnrollmentEntity();
+        GetPayrollResponse payrollResponse = new GetPayrollResponse();
+        PayrollEntity payrollEntity = new PayrollEntity();
 
-        verify(retryOutboxRepository, times(1)).save(any(RetryOutboxEntity.class));
-    }
+        context.put(COMPANY_UUID, companyId.toString());
+        context.put(PYRL_UUID, payrollId.toString());
+        context.put(PYRL_EMPLOYEE_TXN_ID, UUID.randomUUID().toString());
+        context.put(SRC_PAYEE_ID, UUID.randomUUID().toString());
+        context.put(COMPANY_ENROLLMENT, enrollmentEntity);
+        context.put(SRC_GUSTO_SINGLE_PAYROLL, payrollResponse);
+        context.put(PYRL_ENTITY, payrollEntity);
 
-    @Test
-    void testExistingRetryUpdated_whenFound() {
-        RetryOutboxEntity existing = new RetryOutboxEntity();
-        existing.setRetryCount(1);
+        PaymentCustomerEligibilityResponse eligibilityResponse = new PaymentCustomerEligibilityResponse();
+        ProfileLimit profileLimit = mock(ProfileLimit.class);
 
-        when(stepConfig.getSafConfigs()).thenReturn(safConfig);
-        when(stepConfig.isSafEnabled()).thenReturn(true);
-        when(safConfig.getCutoffTime()).thenReturn(LocalTime.now().plusMinutes(5).toString());
-        when(safConfig.getMaxBackoffHours()).thenReturn(3);
-        when(retryOutboxRepository.findByEventIdAndStepName(EVENT_ID.toString(), STEP_NAME))
-            .thenReturn(Optional.of(existing));
+        when(customerConfigurationService.validateProfileAccountAndLimit(any(), anyString(), anyString()))
+                .thenReturn(eligibilityResponse);
+        when(customerConfigurationService.getLimit(any(ProfileLimit.class))).thenReturn(new BigDecimal("100.00"));
+        when(payrollRepository.findTotalPayrollByEnrEnIdAndProcessDate(any(), any())).thenReturn(List.of(BigDecimal.ZERO));
+        when(payrollEntity.getProcessedDate()).thenReturn("2025-05-30");
+        when(payrollResponse.getTotals()).thenReturn(Map.of("companyDebit", new BigDecimal("200.00")));
+        when(eligibilityResponse.getProfileLimit()).thenReturn(profileLimit);
+        when(profileLimit.getProfileId()).thenReturn("profile-X");
+        when(payrollEntity.getEntPrptyId()).thenReturn("enterprise-X");
 
-        retryScheduleService.scheduleRetry(stepConfig, context, FAILURE_REASON);
-
-        assertEquals(2, existing.getRetryCount());
-        verify(retryOutboxRepository).save(existing);
+        ProcessorException ex = assertThrows(ProcessorException.class, () -> step.execute(context));
+        assertEquals(ProcessorExceptionType.BUSINESS_VALIDATION, ex.getType());
+        assertTrue(ex.getMessage().contains("DAILY_LIMIT_EXCEEDED"));
     }
 }
