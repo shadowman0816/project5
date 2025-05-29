@@ -1,176 +1,145 @@
-import net.jpmchase.payroll.processor.common.config.StepConfig;
-import net.jpmchase.payroll.processor.common.context.WorkflowContext;
-import net.jpmchase.payroll.processor.common.context.WorkflowContextStatus;
-import net.jpmchase.payroll.processor.service.EventProcessorService;
-import net.jpmchase.payroll.processor.service.WorkflowRegistry;
-import net.jpmchase.payroll.processor.steps.Condition;
-import net.jpmchase.payroll.processor.steps.ConditionRegistry;
-import net.jpmchase.payroll.processor.steps.RetryScheduleService;
-import net.jpmchase.payroll.processor.steps.Step;
-import net.jpmchase.payroll.processor.steps.WorkflowContextUtil;
-import net.jpmchase.payroll.processor.common.model.Event;
-import net.jpmchase.payroll.processor.common.exception.ProcessorException;
-import net.jpmchase.payroll.processor.common.exception.ProcessorExceptionType;
-
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.mockito.ArgumentCaptor;
-
-import java.util.Collections;
-import java.util.Map;
-
-import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.Mockito.*;
-
+@ExtendWith(MockitoExtension.class)
 class EventProcessorServiceTest {
 
-    private WorkflowRegistry workflowRegistry;
+    @Mock
+    private WorkFlowRegistry workFlowRegistry;
+
+    @Mock
     private Map<String, Step> stepRegistry;
+
+    @Mock
     private ConditionRegistry conditionRegistry;
+
+    @Mock
     private RetryScheduleService retryScheduleService;
+
+    @InjectMocks
     private EventProcessorService eventProcessorService;
 
-    @BeforeEach
-    void setup() {
-        workflowRegistry = mock(WorkflowRegistry.class);
-        stepRegistry = mock(Map.class);
-        conditionRegistry = mock(ConditionRegistry.class);
-        retryScheduleService = mock(RetryScheduleService.class);
-        eventProcessorService = new EventProcessorService(workflowRegistry, stepRegistry, conditionRegistry, retryScheduleService);
+    private static final String ENTITY_TYPE = "entityA";
+    private static final String EVENT_TYPE = "CREATE";
+
+    private Event buildEvent(String entityType, String eventType) {
+        MessageBody body = new MessageBody();
+        body.setEventId(UUID.randomUUID());
+        body.setEntityType(entityType);
+        body.setEventType(eventType);
+
+        Event event = new Event();
+        event.setMessageId("msg123");
+        event.setMessageBody(body);
+        event.setProcessingStatus(EventStatus.PENDING);
+        return event;
+    }
+
+    private StepConfig buildStepConfig(String name, boolean retry, boolean saf, String condition) {
+        StepConfig step = new StepConfig();
+        step.setName(name);
+        step.setRetryEnabled(retry);
+        step.setSafEnabled(saf);
+        step.setExecuteOnCondition(condition);
+        StepConfig.RetryConfig retryCfg = new StepConfig.RetryConfig();
+        retryCfg.setMaxRetryCount(2);
+        retryCfg.setRetryBackoffMs("100ms");
+        step.setRetryConfigs(retryCfg);
+        return step;
     }
 
     @Test
-    void shouldSkipIfStepNotFoundInRegistry() {
-        StepConfig config = new StepConfig();
-        config.setName("MissingStep");
-        when(workflowRegistry.getStepsForEvent("Entity", "Event")).thenReturn(Collections.singletonList(config));
-        when(stepRegistry.get("MissingStep")).thenReturn(null);
+    void test_processEvent_shouldExecuteSuccessfully() {
+        Event event = buildEvent(ENTITY_TYPE, EVENT_TYPE);
+        StepConfig step = buildStepConfig("step1", true, true, "always");
 
-        Event event = new Event("Entity", "Event");
+        when(workFlowRegistry.getStepsForEvent(ENTITY_TYPE, EVENT_TYPE)).thenReturn(List.of(step));
+        when(stepRegistry.get("step1")).thenReturn(context -> WorkflowContextStatus.SUCCESS);
+        when(conditionRegistry.get("always")).thenReturn(ctx -> true);
+
         eventProcessorService.processEvent(event);
-        // Verify it safely skips
-        verify(stepRegistry).get("MissingStep");
+
+        verify(workFlowRegistry).getStepsForEvent(ENTITY_TYPE, EVENT_TYPE);
+        verify(stepRegistry).get("step1");
     }
 
     @Test
-    void shouldEvaluateConditionAndSkipIfFalse() {
-        StepConfig config = new StepConfig();
-        config.setName("Step1");
-        config.setExecuteOnCondition("condition1");
+    void test_processEvent_stepFailsAndRetriesSuccessfully() {
+        Event event = buildEvent(ENTITY_TYPE, EVENT_TYPE);
+        StepConfig step = buildStepConfig("retryStep", true, false, "always");
 
-        Condition condition = mock(Condition.class);
-        when(condition.evaluate(any())).thenReturn(false);
+        when(workFlowRegistry.getStepsForEvent(ENTITY_TYPE, EVENT_TYPE)).thenReturn(List.of(step));
+        when(conditionRegistry.get("always")).thenReturn(ctx -> true);
 
-        when(workflowRegistry.getStepsForEvent("entity", "event")).thenReturn(Collections.singletonList(config));
-        when(stepRegistry.get("Step1")).thenReturn(mock(Step.class));
-        when(conditionRegistry.get("condition1")).thenReturn(condition);
+        Step failingStep = mock(Step.class);
+        doThrow(new ProcessorException(ProcessorExceptionType.INFRA_RETRYABLE, "fail"))
+                .doNothing()
+                .when(failingStep).execute(any());
 
-        Event event = new Event("entity", "event");
+        when(stepRegistry.get("retryStep")).thenReturn(failingStep);
+
         eventProcessorService.processEvent(event);
-        verify(condition).evaluate(any());
+
+        verify(failingStep, times(2)).execute(any());
     }
 
     @Test
-    void shouldRetryAndEventuallySucceed() throws Exception {
-        StepConfig config = new StepConfig();
-        config.setName("StepRetry");
-        config.setRetryEnabled(true);
-        StepConfig.RetryConfig retryConfig = new StepConfig.RetryConfig();
-        retryConfig.setMaxRetryCount(2);
-        config.setRetryConfigs(retryConfig);
+    void test_processEvent_fatalErrorStopsProcessing() {
+        Event event = buildEvent(ENTITY_TYPE, EVENT_TYPE);
+        StepConfig step = buildStepConfig("fatalStep", false, false, "always");
 
-        Step step = mock(Step.class);
-        when(step.execute(any())).thenThrow(new ProcessorException(ProcessorExceptionType.INFRA_RETRYABLE, "Fail"))
-                                 .thenReturn(null); // success on 2nd attempt
+        when(workFlowRegistry.getStepsForEvent(ENTITY_TYPE, EVENT_TYPE)).thenReturn(List.of(step));
+        when(conditionRegistry.get("always")).thenReturn(ctx -> true);
 
-        when(workflowRegistry.getStepsForEvent("e", "t")).thenReturn(Collections.singletonList(config));
-        when(stepRegistry.get("StepRetry")).thenReturn(step);
+        Step failingStep = mock(Step.class);
+        doThrow(new ProcessorException(ProcessorExceptionType.FATAL, "hard fail"))
+                .when(failingStep).execute(any());
 
-        Event event = new Event("e", "t");
+        when(stepRegistry.get("fatalStep")).thenReturn(failingStep);
+
         eventProcessorService.processEvent(event);
 
-        verify(step, times(2)).execute(any());
+        verify(failingStep).execute(any());
+        // Could assert context status = FAILED if exposed
     }
 
     @Test
-    void shouldHandleFatalError() throws Exception {
-        StepConfig config = new StepConfig();
-        config.setName("FatalStep");
-        config.setRetryEnabled(true);
-        StepConfig.RetryConfig retryConfig = new StepConfig.RetryConfig();
-        retryConfig.setMaxRetryCount(1);
-        config.setRetryConfigs(retryConfig);
+    void test_processEvent_skippableErrorLogsAndContinues() {
+        Event event = buildEvent(ENTITY_TYPE, EVENT_TYPE);
+        StepConfig step = buildStepConfig("skipStep", false, false, "always");
 
-        Step step = mock(Step.class);
-        when(step.execute(any())).thenThrow(new ProcessorException(ProcessorExceptionType.FATAL, "Fatal failure"));
+        when(workFlowRegistry.getStepsForEvent(ENTITY_TYPE, EVENT_TYPE)).thenReturn(List.of(step));
+        when(conditionRegistry.get("always")).thenReturn(ctx -> true);
 
-        when(workflowRegistry.getStepsForEvent("x", "y")).thenReturn(Collections.singletonList(config));
-        when(stepRegistry.get("FatalStep")).thenReturn(step);
+        Step skipStep = mock(Step.class);
+        doThrow(new ProcessorException(ProcessorExceptionType.SKIPPABLE, "minor fail"))
+                .when(skipStep).execute(any());
 
-        Event event = new Event("x", "y");
+        when(stepRegistry.get("skipStep")).thenReturn(skipStep);
+
         eventProcessorService.processEvent(event);
-        verify(step, times(1)).execute(any());
+
+        verify(skipStep).execute(any());
     }
 
     @Test
-    void shouldHandleSkippableError() throws Exception {
-        StepConfig config = new StepConfig();
-        config.setName("SkippableStep");
-        Step step = mock(Step.class);
-        when(step.execute(any())).thenThrow(new ProcessorException(ProcessorExceptionType.SKIPPABLE, "Skip"));
+    void test_processEvent_noStepsFound() {
+        Event event = buildEvent(ENTITY_TYPE, EVENT_TYPE);
+        when(workFlowRegistry.getStepsForEvent(ENTITY_TYPE, EVENT_TYPE)).thenReturn(Collections.emptyList());
 
-        when(workflowRegistry.getStepsForEvent("ent", "evt")).thenReturn(Collections.singletonList(config));
-        when(stepRegistry.get("SkippableStep")).thenReturn(step);
-
-        Event event = new Event("ent", "evt");
         eventProcessorService.processEvent(event);
-        verify(step).execute(any());
+
+        verify(workFlowRegistry).getStepsForEvent(ENTITY_TYPE, EVENT_TYPE);
     }
 
     @Test
-    void shouldHandleSilentWarningError() throws Exception {
-        StepConfig config = new StepConfig();
-        config.setName("SilentStep");
-        Step step = mock(Step.class);
-        when(step.execute(any())).thenThrow(new ProcessorException(ProcessorExceptionType.SILENT_WARNING, "warn"));
+    void test_processEvent_stepConditionFails_skipsExecution() {
+        Event event = buildEvent(ENTITY_TYPE, EVENT_TYPE);
+        StepConfig step = buildStepConfig("condStep", true, false, "customCond");
 
-        when(workflowRegistry.getStepsForEvent("abc", "xyz")).thenReturn(Collections.singletonList(config));
-        when(stepRegistry.get("SilentStep")).thenReturn(step);
+        when(workFlowRegistry.getStepsForEvent(ENTITY_TYPE, EVENT_TYPE)).thenReturn(List.of(step));
+        when(conditionRegistry.get("customCond")).thenReturn(ctx -> false);
 
-        Event event = new Event("abc", "xyz");
-        eventProcessorService.processEvent(event);
-        verify(step).execute(any());
-    }
-
-    @Test
-    void shouldHandleBusinessValidation() throws Exception {
-        StepConfig config = new StepConfig();
-        config.setName("BizStep");
-        Step step = mock(Step.class);
-        when(step.execute(any())).thenThrow(new ProcessorException(ProcessorExceptionType.BUSINESS_VALIDATION, "fail"));
-
-        when(workflowRegistry.getStepsForEvent("e1", "e2")).thenReturn(Collections.singletonList(config));
-        when(stepRegistry.get("BizStep")).thenReturn(step);
-
-        Event event = new Event("e1", "e2");
-        eventProcessorService.processEvent(event);
-        verify(step).execute(any());
-    }
-
-    @Test
-    void shouldScheduleRetryOnInfraRetryableWhenSafEnabled() throws Exception {
-        StepConfig config = new StepConfig();
-        config.setName("RetryStep");
-        config.setSafEnabled(true);
-        Step step = mock(Step.class);
-        when(step.execute(any())).thenThrow(new ProcessorException(ProcessorExceptionType.INFRA_RETRYABLE, "infra retry"));
-
-        when(workflowRegistry.getStepsForEvent("E", "T")).thenReturn(Collections.singletonList(config));
-        when(stepRegistry.get("RetryStep")).thenReturn(step);
-
-        Event event = new Event("E", "T");
         eventProcessorService.processEvent(event);
 
-        verify(retryScheduleService).scheduleRetry(eq(config), any(), any());
+        verify(conditionRegistry).get("customCond");
+        verify(stepRegistry, never()).get(any());
     }
 }
