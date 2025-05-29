@@ -293,3 +293,21 @@ public void persist(
         );
     employeeTransactionPersistenceService.saveAllWithAudit(employeeTransactions);
 }
+
+@Modifying
+@Transactional
+@Query(value = SQLQueries.PAYROLL_UPDATE_FOR_PROCESSED_EVENT, nativeQuery = true)
+int updatePayrollProcessedEvent(
+    @Param("lmtAm") BigDecimal lmtAm,
+    @Param("lmtTypeCd") String lmtTypeCd,
+    @Param("segCd") String segCd,
+    @Param("procDt") Timestamp procDt,
+    @Param("histIn") String histIn,
+    @Param("srcChkAm") BigDecimal srcChkAm,
+    @Param("srcPyrlAm") BigDecimal srcPyrlAm,
+    @Param("pyrlStsCd") String pyrlStsCd,
+    @Param("updtUsrId") String updtUsrId,
+    @Param("newUpdtTs") Timestamp newUpdtTs,
+    @Param("srcPyrlId") String srcPyrlId,
+    @Param("currentUpdtTs") Timestamp currentUpdtTs
+);
