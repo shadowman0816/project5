@@ -1,166 +1,169 @@
-import net.jpmchase.payroll.processor.registry.*;
-import net.jpmchase.payroll.processor.registry.config.*;
+package net.jpmchase.payroll.processor.registry;
 
+import net.jpmchase.payroll.processor.common.config.GroupConfig;
+import net.jpmchase.payroll.processor.common.config.StepConfig;
+import net.jpmchase.payroll.processor.common.config.WorkFlowConfig;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.*;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
 
-class WorkflowRegistryTest {
+public class WorkFlowRegistryTest {
 
-    private WorkflowRegistry workflowRegistry;
-    private WorkflowConfig workflowConfig;
+    private WorkFlowRegistry registry;
+    private WorkFlowConfig workflowConfig;
 
     @BeforeEach
-    void setUp() {
-        workflowConfig = new WorkflowConfig();
-        workflowRegistry = new WorkflowRegistry(workflowConfig);
+    void setup() {
+        workflowConfig = new WorkFlowConfig();
+        registry = new WorkFlowRegistry(workflowConfig);
     }
 
     @Test
-    void testGetStepsForEvent_groupConfigMissing_returnsEmptyList() {
-        List<StepConfig> steps = workflowRegistry.getStepsForEvent("ENTITY_A", "EVENT_1");
-        assertTrue(steps.isEmpty());
+    void testGetStepsForEvent_groupNotFound_returnsEmptyList() {
+        workflowConfig.setGroups(Collections.emptyMap());
+
+        List<StepConfig> result = registry.getStepsForEvent("entityA", "eventA");
+
+        assertNotNull(result);
+        assertTrue(result.isEmpty());
     }
 
     @Test
-    void testGetStepsForEvent_eventTypeMissing_returnsEmptyList() {
-        StepGroupConfig groupConfig = new StepGroupConfig();
-        workflowConfig.getGroups().put("ENTITY_A", groupConfig);
+    void testGetStepsForEvent_eventNotFound_returnsEmptyList() {
+        GroupConfig groupConfig = new GroupConfig();
+        groupConfig.setEvents(Collections.emptyMap());
 
-        List<StepConfig> steps = workflowRegistry.getStepsForEvent("ENTITY_A", "EVENT_MISSING");
-        assertTrue(steps.isEmpty());
+        Map<String, GroupConfig> groupMap = new HashMap<>();
+        groupMap.put("entityA", groupConfig);
+        workflowConfig.setGroups(groupMap);
+
+        List<StepConfig> result = registry.getStepsForEvent("entityA", "eventX");
+
+        assertNotNull(result);
+        assertTrue(result.isEmpty());
     }
 
     @Test
-    void testGetStepsForEvent_withRetryAndSafResolution() {
-        StepConfig step1 = new StepConfig();
-        step1.setStepName("Step1");
+    void testGetStepsForEvent_withRetryAndSafSetFromStepLevel() {
+        StepConfig step = new StepConfig();
+        step.setName("step1");
+        step.setRetryEnabled(true);
+        step.setSafEnabled(true);
+        step.setRetryConfigs(new StepConfig.RetryConfig());
+        step.setSafConfigs(new StepConfig.SafConfig());
 
-        StepEventConfig eventConfig = new StepEventConfig(List.of(step1));
-        StepGroupConfig groupConfig = new StepGroupConfig(true, true, Map.of("EVENT_X", eventConfig));
-        groupConfig.setRetryConfigs(new RetryConfigs(3));
-        groupConfig.setSafConfigs(new SafConfigs(5));
+        GroupConfig groupConfig = new GroupConfig();
+        groupConfig.setEvents(Map.of("eventA", List.of(step)));
 
-        workflowConfig.getGroups().put("ENTITY_X", groupConfig);
+        workflowConfig.setGroups(Map.of("entityA", groupConfig));
 
-        List<StepConfig> steps = workflowRegistry.getStepsForEvent("ENTITY_X", "EVENT_X");
+        List<StepConfig> steps = registry.getStepsForEvent("entityA", "eventA");
 
         assertEquals(1, steps.size());
-        StepConfig result = steps.get(0);
-        assertTrue(result.isRetryEnabled());
-        assertTrue(result.isSafEnabled());
-        assertEquals(3, result.getRetryConfigs().getMaxRetryCount());
-        assertEquals(5, result.getSafConfigs().getMaxSafRetryCount());
+        assertTrue(steps.get(0).isRetryEnabled());
+        assertTrue(steps.get(0).isSafEnabled());
     }
 
     @Test
-    void testApplyRetryConfig_whenStepOverridesGroupAndWorkflow() {
+    void testGetStepsForEvent_retryFallbackToGroupLevel() {
         StepConfig step = new StepConfig();
-        step.setRetryConfigs(new RetryConfigs(10)); // override
+        step.setName("step1");
         step.setRetryEnabled(false);
+        step.setRetryConfigs(null); // trigger fallback
 
-        StepGroupConfig groupConfig = new StepGroupConfig(true, true, Collections.emptyMap());
+        StepConfig.RetryConfig groupRetry = new StepConfig.RetryConfig();
+        groupRetry.setMaxRetryCount(5);
+
+        GroupConfig groupConfig = new GroupConfig();
+        groupConfig.setRetryEnabled(true);
+        groupConfig.setRetryConfigs(groupRetry);
+        groupConfig.setEvents(Map.of("eventA", List.of(step)));
+
+        workflowConfig.setGroups(Map.of("entityA", groupConfig));
+
+        List<StepConfig> steps = registry.getStepsForEvent("entityA", "eventA");
+
+        assertTrue(steps.get(0).isRetryEnabled());
+        assertEquals(5, steps.get(0).getRetryConfigs().getMaxRetryCount());
+    }
+
+    @Test
+    void testGetStepsForEvent_retryFallbackToWorkflowLevel() {
+        StepConfig step = new StepConfig();
+        step.setName("step1");
+        step.setRetryEnabled(false);
+        step.setRetryConfigs(null);
+
+        StepConfig.RetryConfig wfRetry = new StepConfig.RetryConfig();
+        wfRetry.setMaxRetryCount(7);
         workflowConfig.setRetryEnabled(true);
-        workflowConfig.setRetryConfigs(new RetryConfigs(5));
+        workflowConfig.setRetryConfigs(wfRetry);
 
-        workflowRegistry.applyRetryConfig(step, groupConfig);
+        GroupConfig groupConfig = new GroupConfig();
+        groupConfig.setRetryEnabled(false); // fallback needed
+        groupConfig.setEvents(Map.of("eventA", List.of(step)));
 
-        // Should not override since step already has retry config
-        assertFalse(step.isRetryEnabled());
-        assertEquals(10, step.getRetryConfigs().getMaxRetryCount());
+        workflowConfig.setGroups(Map.of("entityA", groupConfig));
+
+        List<StepConfig> steps = registry.getStepsForEvent("entityA", "eventA");
+
+        assertTrue(steps.get(0).isRetryEnabled());
+        assertEquals(7, steps.get(0).getRetryConfigs().getMaxRetryCount());
     }
 
     @Test
-    void testApplyRetryConfig_whenOnlyGroupHasRetryConfig() {
+    void testApplySafConfig_fallbackToGroupAndWorkflow() {
         StepConfig step = new StepConfig();
+        step.setName("step1");
+        step.setSafEnabled(false);
+        step.setSafConfigs(null);
 
-        StepGroupConfig groupConfig = new StepGroupConfig(true, true, Collections.emptyMap());
-        groupConfig.setRetryConfigs(new RetryConfigs(3));
+        StepConfig.SafConfig groupSaf = new StepConfig.SafConfig();
+        groupSaf.setEnabled(true);
 
-        workflowRegistry.applyRetryConfig(step, groupConfig);
+        StepConfig.SafConfig wfSaf = new StepConfig.SafConfig();
+        wfSaf.setEnabled(true);
 
-        assertTrue(step.isRetryEnabled());
-        assertEquals(3, step.getRetryConfigs().getMaxRetryCount());
-    }
-
-    @Test
-    void testApplyRetryConfig_whenOnlyWorkflowHasRetryConfig() {
-        StepConfig step = new StepConfig();
-
-        StepGroupConfig groupConfig = new StepGroupConfig(false, false, Collections.emptyMap());
-
-        workflowConfig.setRetryEnabled(true);
-        workflowConfig.setRetryConfigs(new RetryConfigs(4));
-
-        workflowRegistry.applyRetryConfig(step, groupConfig);
-
-        assertTrue(step.isRetryEnabled());
-        assertEquals(4, step.getRetryConfigs().getMaxRetryCount());
-    }
-
-    @Test
-    void testApplySafConfig_whenStepOverridesGroupAndWorkflow() {
-        StepConfig step = new StepConfig();
-        step.setSafConfigs(new SafConfigs(9)); // override
-        step.setSafEnabled(true);
-
-        StepGroupConfig groupConfig = new StepGroupConfig(true, true, Collections.emptyMap());
-        workflowConfig.setSafEnabled(true);
-        workflowConfig.setSafConfigs(new SafConfigs(2));
-
-        workflowRegistry.applySafConfig(step, groupConfig);
-
-        // Should not override since step already has SAF config
-        assertTrue(step.isSafEnabled());
-        assertEquals(9, step.getSafConfigs().getMaxSafRetryCount());
-    }
-
-    @Test
-    void testApplySafConfig_whenOnlyGroupHasSafConfig() {
-        StepConfig step = new StepConfig();
-
-        StepGroupConfig groupConfig = new StepGroupConfig(true, true, Collections.emptyMap());
-        groupConfig.setSafConfigs(new SafConfigs(7));
-
-        workflowRegistry.applySafConfig(step, groupConfig);
-
-        assertTrue(step.isSafEnabled());
-        assertEquals(7, step.getSafConfigs().getMaxSafRetryCount());
-    }
-
-    @Test
-    void testApplySafConfig_whenOnlyWorkflowHasSafConfig() {
-        StepConfig step = new StepConfig();
-
-        StepGroupConfig groupConfig = new StepGroupConfig(false, false, Collections.emptyMap());
+        GroupConfig groupConfig = new GroupConfig();
+        groupConfig.setSafEnabled(true);
+        groupConfig.setSafConfigs(groupSaf);
+        groupConfig.setEvents(Map.of("eventA", List.of(step)));
 
         workflowConfig.setSafEnabled(true);
-        workflowConfig.setSafConfigs(new SafConfigs(8));
+        workflowConfig.setSafConfigs(wfSaf);
+        workflowConfig.setGroups(Map.of("entityA", groupConfig));
 
-        workflowRegistry.applySafConfig(step, groupConfig);
+        List<StepConfig> steps = registry.getStepsForEvent("entityA", "eventA");
 
-        assertTrue(step.isSafEnabled());
-        assertEquals(8, step.getSafConfigs().getMaxSafRetryCount());
+        assertTrue(steps.get(0).isSafEnabled());
+        assertEquals(groupSaf, steps.get(0).getSafConfigs());
     }
 
     @Test
-    void testGetRetryCountForStep_whenNullStep() {
-        assertEquals(0, workflowRegistry.getRetryCountForStep(null));
-    }
-
-    @Test
-    void testGetRetryCountForStep_whenStepHasNoRetryConfig() {
+    void testGetRetryForStep_returnsRetryCountSafely() {
         StepConfig step = new StepConfig();
-        assertEquals(0, workflowRegistry.getRetryCountForStep(step));
+        StepConfig.RetryConfig retry = new StepConfig.RetryConfig();
+        retry.setMaxRetryCount(4);
+        step.setRetryConfigs(retry);
+
+        int result = registry.getRetryCountForStep(step);
+
+        assertEquals(4, result);
     }
 
     @Test
-    void testGetRetryCountForStep_withRetryConfig() {
+    void testGetRetryForStep_nullSafe_returnsZero() {
+        int result = registry.getRetryCountForStep(null);
+        assertEquals(0, result);
+
         StepConfig step = new StepConfig();
-        step.setRetryConfigs(new RetryConfigs(6));
-        assertEquals(6, workflowRegistry.getRetryCountForStep(step));
+        step.setRetryConfigs(null);
+
+        result = registry.getRetryCountForStep(step);
+        assertEquals(0, result);
     }
 }
