@@ -1,0 +1,328 @@
+import net.jpmchase.payroll.processor.model.context.WorkflowContext;
+import net.jpmchase.payroll.processor.model.employee.EmployeeCompensations;
+import net.jpmchase.payroll.processor.model.employee.EmployeePaymentConfiguration;
+import net.jpmchase.payroll.processor.model.employee.Split;
+import net.jpmchase.payroll.processor.model.payee.PayeeAccountEntity;
+import net.jpmchase.payroll.processor.model.payee.PayeeEntity;
+import net.jpmchase.payroll.processor.model.enums.PaymentMethod;
+import net.jpmchase.payroll.processor.repository.mgmt.payee.PayeeAccountRepository;
+import net.jpmchase.payroll.processor.repository.mgmt.payee.PayeeRepository;
+import net.jpmchase.payroll.processor.service.persistence.PayeeAccountPersistenceService;
+import net.jpmchase.payroll.processor.service.persistence.PayeePersistenceService;
+import net.jpmchase.payroll.processor.service.gusto.retrieval.EmployeeService;
+import net.jpmchase.payroll.processor.steps.service.ReconcileEmployeePaymentService;
+import net.jpmchase.payroll.processor.utils.AppConstants;
+import net.jpmchase.payroll.processor.exception.ProcessorException;
+import org.junit.jupiter.api.*;
+import org.mockito.*;
+
+import java.math.BigDecimal;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
+
+class ReconcileEmployeePaymentServiceTest {
+
+    private ReconcileEmployeePaymentService service;
+
+    private PayeeRepository payeeRepository;
+    private PayeeAccountRepository payeeAccountRepository;
+    private PayeePersistenceService payeePersistenceService;
+    private PayeeAccountPersistenceService payeeAccountPersistenceService;
+    private EmployeeService employeeService;
+
+    private WorkflowContext context;
+
+    @BeforeEach
+    void setup() {
+        payeeRepository = mock(PayeeRepository.class);
+        payeeAccountRepository = mock(PayeeAccountRepository.class);
+        payeePersistenceService = mock(PayeePersistenceService.class);
+        payeeAccountPersistenceService = mock(PayeeAccountPersistenceService.class);
+        employeeService = mock(EmployeeService.class);
+
+        service = new ReconcileEmployeePaymentService(
+            payeeAccountRepository, payeeRepository,
+            payeeAccountPersistenceService, payeePersistenceService,
+            employeeService, payeeAccountPersistenceService
+        );
+
+        context = new WorkflowContext();
+        context.put("COMPANY_UUID", "comp1");
+        context.put("PAYROLL_ENTITY", mock(Object.class));
+        context.put("COMPANY_ENROLLMENT", mock(Object.class));
+    }
+
+    @Test
+    void testReconcile_checkWithEmptySplits_shouldPass() {
+        EmployeeCompensations comp = new EmployeeCompensations();
+        comp.setEmployeeUUID("emp1");
+        comp.setPaymentMethod(PaymentMethod.Check);
+
+        EmployeePaymentConfiguration config = new EmployeePaymentConfiguration();
+        config.setPaymentMethod(PaymentMethod.Check);
+        config.setSplits(Collections.emptyList());
+
+        service.reconcile(comp, config, context);
+
+        verifyNoInteractions(payeePersistenceService);
+        verifyNoInteractions(payeeAccountPersistenceService);
+    }
+
+    @Test
+    void testReconcile_directDepositWithEmptySplits_shouldFail() {
+        EmployeeCompensations comp = new EmployeeCompensations();
+        comp.setEmployeeUUID("emp2");
+        comp.setPaymentMethod(PaymentMethod.DirectDeposit);
+
+        EmployeePaymentConfiguration config = new EmployeePaymentConfiguration();
+        config.setPaymentMethod(PaymentMethod.DirectDeposit);
+        config.setSplits(Collections.emptyList());
+
+        ProcessorException ex = assertThrows(ProcessorException.class, () ->
+            service.reconcile(comp, config, context)
+        );
+
+        assertTrue(ex.getMessage().contains("BANK_ACCOUNT_NOT_FOUND"));
+    }
+
+    @Test
+    void testReconcile_missingPayee_shouldSyncFromGusto() {
+        EmployeeCompensations comp = new EmployeeCompensations();
+        comp.setEmployeeUUID("emp3");
+        comp.setPaymentMethod(PaymentMethod.DirectDeposit);
+
+        Split split = new Split();
+        split.setBankAccountUUID("uuid1");
+        split.setBankAccountName("ABC");
+        split.setRoutingNumber("123");
+        split.setAccountNumber("456");
+        split.setPriority(1);
+
+        EmployeePaymentConfiguration config = new EmployeePaymentConfiguration();
+        config.setPaymentMethod(PaymentMethod.DirectDeposit);
+        config.setSplits(List.of(split));
+
+        when(payeeRepository.findBySrcPayeeId("emp3")).thenReturn(Optional.empty());
+
+        PayeeEntity mockPayee = new PayeeEntity();
+        when(payeePersistenceService.saveAndFlushWithAudit(any())).thenReturn(mockPayee);
+
+        when(payeeAccountRepository.findBySourcePayeeId("emp3")).thenReturn(Optional.of(Collections.emptyList()));
+
+        service.reconcile(comp, config, context);
+
+        verify(payeePersistenceService).saveAndFlushWithAudit(any());
+    }
+
+    @Test
+    void testReconcile_existingPayeeAccountMismatch_shouldUpdate() {
+        EmployeeCompensations comp = new EmployeeCompensations();
+        comp.setEmployeeUUID("emp4");
+        comp.setPaymentMethod(PaymentMethod.DirectDeposit);
+
+        Split split = new Split();
+        split.setBankAccountUUID("uuid1");
+        split.setBankAccountName("Mismatch");
+        split.setRoutingNumber("999");
+        split.setAccountNumber("888");
+        split.setPriority(1);
+
+        EmployeePaymentConfiguration config = new EmployeePaymentConfiguration();
+        config.setPaymentMethod(PaymentMethod.DirectDeposit);
+        config.setSplits(List.of(split));
+
+        PayeeEntity payee = new PayeeEntity();
+        payee.setSrcPayeeId("emp4");
+
+        PayeeAccountEntity account = new PayeeAccountEntity();
+        account.setSrcBnkId("uuid1");
+        account.setBnkNm("Different");
+        account.setRtnNb("777");
+        account.setAcctNb("666");
+        account.setPyrnPayeeAcctId("acct-1");
+
+        when(payeeRepository.findBySrcPayeeId("emp4")).thenReturn(Optional.of(payee));
+        when(payeeAccountRepository.findBySourcePayeeId("emp4")).thenReturn(Optional.of(List.of(account)));
+
+        service.reconcile(comp, config, context);
+
+        verify(payeeAccountPersistenceService).saveAndFlushWithAudit(any(PayeeAccountEntity.class));
+    }
+
+    @Test
+    void testReconcile_allValid_shouldSucceed() {
+        EmployeeCompensations comp = new EmployeeCompensations();
+        comp.setEmployeeUUID("emp5");
+        comp.setPaymentMethod(PaymentMethod.DirectDeposit);
+
+        Split split = new Split();
+        split.setBankAccountUUID("uuid1");
+        split.setBankAccountName("BankX");
+        split.setRoutingNumber("123");
+        split.setAccountNumber("456");
+        split.setPriority(1);
+
+        EmployeePaymentConfiguration config = new EmployeePaymentConfiguration();
+        config.setPaymentMethod(PaymentMethod.DirectDeposit);
+        config.setSplits(List.of(split));
+
+        PayeeEntity payee = new PayeeEntity();
+        payee.setSrcPayeeId("emp5");
+
+        PayeeAccountEntity account = new PayeeAccountEntity();
+        account.setSrcBnkId("uuid1");
+        account.setBnkNm("BankX");
+        account.setRtnNb("123");
+        account.setAcctNb("456");
+
+        when(payeeRepository.findBySrcPayeeId("emp5")).thenReturn(Optional.of(payee));
+        when(payeeAccountRepository.findBySourcePayeeId("emp5")).thenReturn(Optional.of(List.of(account)));
+
+        service.reconcile(comp, config, context);
+
+        verify(payeeAccountPersistenceService, never()).saveAndFlushWithAudit(any());
+    }
+}
+package net.jpmchase.payroll.processor.steps.payroll;
+
+import net.jpmchase.payroll.processor.common.context.WorkflowContext;
+import net.jpmchase.payroll.processor.model.employee.EmployeePaymentConfiguration;
+import net.jpmchase.payroll.processor.model.gusto.GetPayrollResponse;
+import net.jpmchase.payroll.processor.model.enrollment.EnrollmentEntity;
+import net.jpmchase.payroll.processor.service.ReconcileEmployeePaymentService;
+import net.jpmchase.payroll.processor.service.gusto.retrieval.PaymentConfigurationService;
+import net.jpmchase.payroll.processor.model.employee.EmployeeCompensations;
+import net.jpmchase.payroll.processor.enums.PaymentMethod;
+import net.jpmchase.payroll.processor.exception.ProcessorException;
+import net.jpmchase.payroll.processor.exception.ProcessorExceptionType;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
+
+import java.util.Collections;
+import java.util.List;
+import java.util.UUID;
+
+import static org.mockito.Mockito.*;
+
+public class ReconcileEmployeePaymentInformationStepTest {
+
+    private ReconcileEmployeePaymentInformationStep step;
+    private ReconcileEmployeePaymentService reconcileService;
+    private PaymentConfigurationService paymentConfigurationService;
+
+    private WorkflowContext context;
+
+    @BeforeEach
+    public void setup() {
+        reconcileService = mock(ReconcileEmployeePaymentService.class);
+        paymentConfigurationService = mock(PaymentConfigurationService.class);
+        step = new ReconcileEmployeePaymentInformationStep(reconcileService, paymentConfigurationService);
+
+        context = new WorkflowContext();
+    }
+
+    @Test
+    public void shouldSkipStepIfCancelFlagSet() {
+        context.put("CANCEL_GUSTO_PAYROLL", true);
+        step.execute(context);
+        verifyNoInteractions(reconcileService);
+    }
+
+    @Test
+    public void shouldSkipIfNoEmployeeCompensations() {
+        context.put("CANCEL_GUSTO_PAYROLL", false);
+        context.put("GUSTO_SINGLE_PAYROLL", new GetPayrollResponse()); // no employeeCompensations
+        context.put("COMPANY_ENROLLMENT", new EnrollmentEntity());
+        context.put("PYRL_UUID", UUID.randomUUID().toString());
+        context.put("COMPANY_UUID", UUID.randomUUID().toString());
+
+        step.execute(context);
+        verifyNoInteractions(reconcileService);
+    }
+
+    @Test
+    public void shouldThrowIfConfigNotFound() {
+        UUID companyId = UUID.randomUUID();
+        UUID payrollId = UUID.randomUUID();
+        String employeeId = "emp123";
+
+        context.put("GUSTO_SINGLE_PAYROLL", GetPayrollResponse.builder()
+                .employeeCompensations(List.of(EmployeeCompensations.builder()
+                        .getEmployeeUUID(() -> employeeId)
+                        .build()))
+                .build());
+        context.put("COMPANY_ENROLLMENT", new EnrollmentEntity());
+        context.put("PYRL_UUID", payrollId.toString());
+        context.put("COMPANY_UUID", companyId.toString());
+
+        when(paymentConfigurationService.getPaymentConfigurationsForAllEmployees(any(), any(), any()))
+                .thenReturn(Collections.emptyList());
+
+        try {
+            step.execute(context);
+        } catch (ProcessorException ex) {
+            assert ex.getType() == ProcessorExceptionType.BUSINESS_VALIDATION;
+        }
+
+        verifyNoInteractions(reconcileService);
+    }
+
+    @Test
+    public void shouldCallReconcileForValidConfig() {
+        UUID companyId = UUID.randomUUID();
+        UUID payrollId = UUID.randomUUID();
+        String employeeId = "emp123";
+
+        EmployeePaymentConfiguration config = mock(EmployeePaymentConfiguration.class);
+        when(config.getEmployeeId()).thenReturn(employeeId);
+
+        context.put("GUSTO_SINGLE_PAYROLL", GetPayrollResponse.builder()
+                .employeeCompensations(List.of(EmployeeCompensations.builder()
+                        .getEmployeeUUID(() -> employeeId)
+                        .build()))
+                .build());
+        context.put("COMPANY_ENROLLMENT", new EnrollmentEntity());
+        context.put("PYRL_UUID", payrollId.toString());
+        context.put("COMPANY_UUID", companyId.toString());
+
+        when(paymentConfigurationService.getPaymentConfigurationsForAllEmployees(any(), any(), any()))
+                .thenReturn(List.of(config));
+
+        step.execute(context);
+
+        verify(reconcileService).reconcile(any(), eq(config), eq(context));
+    }
+
+    @Test
+    public void shouldNotThrowIfCheckPaymentHasEmptySplits() {
+        UUID companyId = UUID.randomUUID();
+        UUID payrollId = UUID.randomUUID();
+        String employeeId = "emp-check";
+
+        EmployeePaymentConfiguration config = mock(EmployeePaymentConfiguration.class);
+        when(config.getEmployeeId()).thenReturn(employeeId);
+        when(config.getPaymentMethod()).thenReturn(PaymentMethod.Check);
+        when(config.getSplits()).thenReturn(Collections.emptyList());
+
+        context.put("GUSTO_SINGLE_PAYROLL", GetPayrollResponse.builder()
+                .employeeCompensations(List.of(EmployeeCompensations.builder()
+                        .getEmployeeUUID(() -> employeeId)
+                        .build()))
+                .build());
+        context.put("COMPANY_ENROLLMENT", new EnrollmentEntity());
+        context.put("PYRL_UUID", payrollId.toString());
+        context.put("COMPANY_UUID", companyId.toString());
+
+        when(paymentConfigurationService.getPaymentConfigurationsForAllEmployees(any(), any(), any()))
+                .thenReturn(List.of(config));
+
+        step.execute(context);
+
+        verify(reconcileService).reconcile(any(), eq(config), eq(context));
+    }
+}
