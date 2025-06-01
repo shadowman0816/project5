@@ -415,5 +415,68 @@ class EmployeeTransactionUtilTest {
     }
 }
 
+package net.jpmchase.payroll.processor.steps.payee.gusto;
 
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import net.jpmchase.payroll.processor.common.context.WorkflowContext;
+import net.jpmchase.payroll.processor.enums.ProcessorExceptionType;
+import net.jpmchase.payroll.processor.exception.ProcessorException;
+import net.jpmchase.payroll.processor.model.gusto.GetPayrollResponse;
+import net.jpmchase.payroll.processor.repository.enrl.entity.EnrollmentEntity;
+import net.jpmchase.payroll.processor.repository.mgmt.entity.PayrollEntity;
+import net.jpmchase.payroll.processor.service.gusto.retrieval.PayrollService;
+import org.springframework.stereotype.Component;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.time.LocalDate;
+import java.time.ZoneId;
+import java.util.Date;
+
+import static net.jpmchase.payroll.processor.utils.ErrorCode.*;
+import static net.jpmchase.payroll.processor.utils.WorkflowContextUtil.*;
+
+@Component("ValidatePayrollStatusFromGusto")
+@RequiredArgsConstructor
+@Slf4j
+public class GustoPayrollRetrievalStep implements Step {
+
+    private final PayrollService payrollService;
+
+    @Override
+    @Transactional
+    public void execute(WorkflowContext context) {
+        final String payrollUuid = context.get(PYRL_UUID, String.class);
+        final String companyId = context.get(COMPANY_UUID, String.class);
+        final EnrollmentEntity enrollmentEntity = context.get(COMPANY_ENROLLMENT, EnrollmentEntity.class);
+        final PayrollEntity payrollEntity = context.get(PAYROLL_ENTITY, PayrollEntity.class);
+
+        log.info("[STEP] Validating payroll status from Gusto for companyId={}, payrollUuid={}", companyId, payrollUuid);
+        final GetPayrollResponse payrollResponse = payrollService.getSinglePayroll(enrollmentEntity.getRelEntPtyId(), companyId, payrollUuid);
+
+        if (payrollResponse == null || !payrollResponse.isProcessed()) {
+            log.info("[STEP] Payroll status is not 'processed' for payrollUuid={}. Skipping processing.", payrollUuid);
+            throw new ProcessorException(ProcessorExceptionType.BUSINESS_VALIDATION,
+                    INVALID_PAYROLL_STATUS.getCode(),
+                    INVALID_PAYROLL_STATUS.formatMessage(payrollUuid));
+        }
+
+        // === Enhancement: Validate calculatedDate match ===
+        LocalDate gustoCalculatedDate = payrollResponse.getCalculatedDate();
+        LocalDate entityCalculatedDate = payrollEntity.getCalculatedDate().toInstant()
+                .atZone(ZoneId.systemDefault())
+                .toLocalDate();
+
+        if (!gustoCalculatedDate.equals(entityCalculatedDate)) {
+            log.warn("[STEP] Calculated date mismatch: Gusto={}, DB={}", gustoCalculatedDate, entityCalculatedDate);
+            throw new ProcessorException(ProcessorExceptionType.BUSINESS_VALIDATION,
+                    INVALID_PAYROLL_CALCULATION_DATE.getCode(),
+                    INVALID_PAYROLL_CALCULATION_DATE.formatMessage(payrollUuid, gustoCalculatedDate, entityCalculatedDate));
+        }
+
+        context.put(GUSTO_SINGLE_PAYROLL, payrollResponse);
+        log.info("[STEP] Payroll status is 'processed' and calculation date matched for payrollUuid={}. Proceeding.", payrollUuid);
+    }
+}
+INVALID_PAYROLL_CALCULATION_DATE("ERR_INVALID_PAYROLL_CALC_DATE", "Calculated date mismatch for payrollId={} - Gusto={}, DB={}");
 
