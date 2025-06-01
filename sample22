@@ -1,4 +1,4 @@
-@Component
+@Component("ReconcileAndMergeEmployeePaymentConfigurations")
 @RequiredArgsConstructor
 @Slf4j
 public class ReconcileEmployeePaymentInformationStep implements Step {
@@ -6,71 +6,100 @@ public class ReconcileEmployeePaymentInformationStep implements Step {
     private final ReconcileEmployeePaymentService reconcileService;
     private final EmployeePaymentConfigurationService paymentConfigurationService;
     private final PayeeAccountRepository payeeAccountRepository;
-    private final PayeeRepository payeeRepository;
     private final PayeePersistenceService employeeAccountPersistenceService;
+    private final PayeeRepository payeeRepository;
+    private final EmployeeService employeeService;
 
     @Override
     public void execute(WorkflowContext context) {
         if (Boolean.TRUE.equals(context.get(CANCEL_GUSTO_PAYROLL, Boolean.class))) {
-            log.info("[STEP] Skipping step ReconcileEmployeePaymentInformationStep due to failed condition evaluation.");
+            log.info("[STEP] Skipping reconciliation step due to cancel signal.");
             return;
         }
 
-        final GetPayrollResponse payrollResponse = context.get(GUSTO_SINGLE_PAYROLL, GetPayrollResponse.class);
-        final EnrollmentEntity enrollmentEntity = context.get(PAYROLL_ENTITY, EnrollmentEntity.class);
+        final GetPayrollResponse payrollResponse = context.get(PAYROLL_ENTITY, GetPayrollResponse.class);
         final String companyId = context.get(COMPANY_UUID, String.class);
         final String payrollId = context.get(PYRL_UUID, String.class);
 
         if (payrollResponse.getEmployeeCompensations() == null) {
-            log.info("[STEP] No Employee compensations from Gusto. Reconcile step skipped for companyId={}", companyId);
+            log.info("[STEP] No employee compensations from Gusto. Skipping reconciliation.");
             return;
         }
 
-        List<EmployeePaymentConfiguration> configs = paymentConfigurationService
-            .getPaymentConfigurationsForAllEmployees(enrollmentEntity.getEntPrtyId(), UUID.fromString(companyId), UUID.fromString(payrollId));
+        List<EmployeePaymentConfiguration> configs =
+            paymentConfigurationService.getPaymentConfigurationsForAllEmployees(
+                payrollResponse.getEnterprisePartyId(), UUID.fromString(companyId), UUID.fromString(payrollId)
+            );
 
-        Map<String, List<EmployeePaymentConfiguration>> configMap = configs.stream()
-            .collect(Collectors.groupingBy(EmployeePaymentConfiguration::getEmployeeId));
+        for (EmployeeCompensation employeeComp : payrollResponse.getEmployeeCompensations()) {
+            String employeeId = employeeComp.getEmployeeUuid();
 
-        List<PayeeAccountEntity> payeeAccounts = new ArrayList<>();
+            EmployeePaymentConfiguration employeePaymentConfig = configs.stream()
+                .filter(config -> config.getEmployeeUuid().equals(employeeId))
+                .findFirst()
+                .orElseThrow(() -> new ProcessorException(
+                    ErrorCode.EMPLOYEE_CONFIG_API_MISMATCH_WITH_SINGLE_PYRL_GUSTO,
+                    format("Employee UUID %s not found in configs", employeeId)
+                ));
 
-        for (EmployeeCompensation comp : payrollResponse.getEmployeeCompensations()) {
-            String employeeId = comp.getEmployeeId();
-            List<EmployeePaymentConfiguration> employeeConfigs = configMap.get(employeeId);
+            // Step 1: Sync payee
+            PayeeEntity payee = reconcileService.syncPayrollDBWithGustoForPayees(employeeId, context);
 
-            if (employeeConfigs == null || employeeConfigs.isEmpty()) {
-                throw new ProcessorException(ErrorCode.EMPLOYEE_CONFIG_API_MISMATCH_WITH_SINGLE_PYRL_GUSTO,
-                        "No EmployeePaymentConfiguration found for employeeId=" + employeeId);
+            // Step 2: Load existing accounts
+            List<PayeeAccountEntity> payeeAccounts = payeeAccountRepository.findBySourcePayeeId(employeeId);
+
+            List<Split> splits = employeePaymentConfig.getSplits();
+            String paymentType = employeePaymentConfig.getPaymentType();
+
+            // Step 3: Validation
+            if ((splits == null || splits.isEmpty()) && "DIRECT_DEPOSIT".equalsIgnoreCase(paymentType)) {
+                throw new ProcessorException(
+                    ErrorCode.GUSTO_BANK_ACCOUNT_NOT_FOUND_IN_PYRL.getCode(),
+                    ErrorCode.GUSTO_BANK_ACCOUNT_NOT_FOUND_IN_PYRL.formatMessage(employeeId)
+                );
             }
 
-            for (EmployeePaymentConfiguration config : employeeConfigs) {
-                // Check and create payee if not exists
-                Optional<PayeeEntity> payeeOpt = payeeRepository.findBySourcePayeeId(config.getEmployeeId());
-                PayeeEntity payee = payeeOpt.orElseGet(() -> {
-                    log.info("Creating new payee for employeeId={} and companyId={}", config.getEmployeeId(), companyId);
-                    return employeeAccountPersistenceService.savePayee(config.getEmployeeId(), enrollmentEntity.getEntPrtyId());
-                });
+            if ((splits == null || splits.isEmpty()) && "CHECK".equalsIgnoreCase(paymentType)) {
+                log.info("[STEP] Skipping account check for CHECK payment type. No splits present for employeeId={}", employeeId);
+                continue;
+            }
 
-                // Check and create payee account if not exists
-                Optional<PayeeAccountEntity> payeeAccountOpt = payeeAccountRepository
-                        .findBySourcePayeeIdAndBankAccountUUID(config.getEmployeeId(), config.getBankAccountUUID());
+            // Step 4: Validate each split bank account against existing account
+            for (Split split : splits) {
+                String bankUuid = split.getBankAccountUUID();
+                Optional<PayeeAccountEntity> matchedAccount = payeeAccounts.stream()
+                    .filter(p -> p.getSrcBnkId().equals(bankUuid))
+                    .findFirst();
 
-                if (payeeAccountOpt.isEmpty()) {
-                    log.info("Creating payee account for employeeId={} and account={}", config.getEmployeeId(), config.getBankAccountUUID());
-                    PayeeAccountEntity account = employeeAccountPersistenceService.savePayeeAccount(payee.getPayeeId(), config);
-                    payeeAccounts.add(account);
+                if (matchedAccount.isPresent()) {
+                    PayeeAccountEntity existing = matchedAccount.get();
+
+                    if (!Objects.equals(existing.getBnkNm(), split.getBankAccountName()) ||
+                        !Objects.equals(existing.getRtn(), split.getRoutingNumber()) ||
+                        !Objects.equals(existing.getAcNb(), split.getAccountNumber())) {
+
+                        throw new ProcessorException(
+                            ErrorCode.GUSTO_BANK_ACCOUNT_MISMATCH_IN_PYRL.getCode(),
+                            ErrorCode.GUSTO_BANK_ACCOUNT_MISMATCH_IN_PYRL.formatMessage(
+                                split.getBankAccountName(), split.getRoutingNumber(), split.getAccountNumber()
+                            )
+                        );
+                    }
+
                 } else {
-                    payeeAccounts.add(payeeAccountOpt.get());
+                    // Step 5: Create new payee account
+                    PayeeAccountEntity newAccount = reconcileService.createPayeeAccountEntity(employeePaymentConfig, split);
+                    employeeAccountPersistenceService.saveAndFlushWithAudit(newAccount);
+                    payeeAccounts.add(newAccount);
                 }
             }
+
+            // Step 6: Map and put final data in context
+            context.put(BANK_ACCOUNT_TO_PAYEE_ACCOUNT_MAP,
+                reconcileService.getBankAccountToPayeeAccountMap(employeePaymentConfig, payeeAccounts));
+            context.put(PAYROLL_EMP_CONFIGURATIONS, configs);
+
+            log.info("[STEP] Reconciliation completed for employeeId={}, companyId={}", employeeId, companyId);
         }
-
-        Map<String, String> bankAccountToPayeeAccountMap =
-                reconcileService.getBankAccountToPayeeAccountMap(configMap, payeeAccounts);
-
-        context.put(BANK_ACCOUNT_TO_PAYEE_ACCOUNT_MAP, bankAccountToPayeeAccountMap);
-        context.put(PAYROLL_EMP_CONFIGURATIONS, configs);
-
-        log.info("[STEP] ReconcileEmployeePaymentInformationStep completed for companyId={}", companyId);
     }
 }
