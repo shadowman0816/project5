@@ -1,0 +1,90 @@
+package net.jpmchase.payroll.processor.service.gusto.retrieval;
+
+import net.jpmchase.payroll.processor.model.api.response.gusto.GetPayrollResponse;
+import net.jpmchase.payroll.processor.model.api.response.gusto.CancelPayrollResponse;
+import net.jpmchase.payroll.processor.service.proxy.CIBGustoWebProxyClient;
+import net.jpmchase.payroll.processor.service.util.ResponseMapper;
+import net.jpmchase.payroll.processor.service.util.EndPointURLProvider;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.InjectMocks;
+import org.mockito.Mock;
+import org.mockito.MockitoAnnotations;
+
+import java.util.List;
+import java.util.Map;
+
+import static java.util.Collections.singletonList;
+import static java.util.Map.of;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.mockito.Mockito.*;
+
+class PayrollServiceTest {
+
+    @Mock
+    private CIBGustoWebProxyClient cibGustoWebProxyClient;
+
+    @Mock
+    private ResponseMapper responseMapper;
+
+    @Mock
+    private EndPointURLProvider endPointURLProvider;
+
+    @InjectMocks
+    private PayrollService payrollService;
+
+    private final String companyId = "123456";
+    private final String payrollId = "9876543210";
+    private final String entId = "enterprise-999";
+    private final String endpointURL = "https://dummy.gusto.api/payroll";
+
+    private final Map<String, String> expectedQueryParams = Map.of("include", "payroll_status_meta");
+
+    @BeforeEach
+    void setup() {
+        MockitoAnnotations.openMocks(this);
+    }
+
+    @Test
+    void testSinglePayrollRetrieval_shouldSucceed() {
+        GetPayrollResponse expectedResponse = new GetPayrollResponse();
+
+        when(endPointURLProvider.endPointURLWithPathVariablesAndQueryParameters(
+                anyList(), eq(expectedQueryParams))
+        ).thenReturn(endpointURL);
+
+        when(cibGustoWebProxyClient.get(endpointURL)).thenReturn("raw-response");
+
+        when(responseMapper.readValue("raw-response", GetPayrollResponse.class))
+                .thenReturn(expectedResponse);
+
+        GetPayrollResponse actual = payrollService.getSinglePayroll(entId, companyId, payrollId);
+
+        assertNotNull(actual);
+        assertEquals(expectedResponse, actual);
+
+        verify(responseMapper).readValue("raw-response", GetPayrollResponse.class);
+    }
+
+    @Test
+    void testCancelPayroll_shouldSucceed() {
+        CancelPayrollResponse cancelResponse = new CancelPayrollResponse();
+
+        when(endPointURLProvider.endPointURLWithPathVariablesOnly(anyList()))
+                .thenReturn(endpointURL);
+
+        when(cibGustoWebProxyClient.get(endpointURL)).thenReturn("cancel-payload");
+
+        when(responseMapper.readValue("cancel-payload", CancelPayrollResponse.class))
+                .thenReturn(cancelResponse);
+
+        CancelPayrollResponse result = payrollService.cancelPayroll(entId, companyId, payrollId);
+
+        assertNotNull(result);
+        assertEquals(cancelResponse, result);
+
+        verify(responseMapper).readValue("cancel-payload", CancelPayrollResponse.class);
+    }
+}
