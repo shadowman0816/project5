@@ -1,0 +1,419 @@
+public class EmployeeTransactionUtil {
+
+    public static List<EmployeeTransactionEntity> generateEmployeeTransactions(
+            final EmployeeCompensations emp,
+            final EmployeePaymentConfiguration config,
+            final Map<String, String> bankAccountToPayrollAccountMap,
+            final String procDate,
+            final String empTxnId,
+            final String srcEvtId,
+            final BigDecimal checkAmount
+    ) {
+        List<EmployeeTransactionEntity> transactions = new ArrayList<>();
+        String splitsBy = config.getSplitsBy();
+        Timestamp now = currentTimestamp();
+
+        List<Split> splits = config.getSplits();
+        PaymentMethod paymentMethod = emp.getPaymentMethod();
+
+        if (splits != null && !splits.isEmpty()) {
+            for (Split split : splits) {
+                BigDecimal splitAmount = getSplitAmount(checkAmount, split, splitsBy);
+                transactions.add(buildTransaction(
+                        procDate, empTxnId, config.getEmployeeId(), bankAccountToPayrollAccountMap.get(split.getBankAccountUUID()),
+                        config.getPayeeName(), splitAmount, config.getSrcTxnAmt(), PayrollStatus.PENDING,
+                        srcEvtId, paymentMethod, now
+                ));
+            }
+        } else if (PaymentMethod.Check.name().equalsIgnoreCase(paymentMethod.name())) {
+            // If no splits and method is CHECK, create a single full transaction
+            transactions.add(buildTransaction(
+                    procDate, empTxnId, config.getEmployeeId(), null,
+                    config.getPayeeName(), checkAmount, config.getSrcTxnAmt(), PayrollStatus.PENDING,
+                    srcEvtId, paymentMethod, now
+            ));
+        }
+
+        return transactions;
+    }
+
+    private static BigDecimal getSplitAmount(BigDecimal checkAmount, Split split, String splitsBy) {
+        if (checkAmount == null) return BigDecimal.ZERO;
+
+        BigDecimal splitAmount = BigDecimal.ZERO;
+
+        if ("PERCENTAGE".equalsIgnoreCase(splitsBy)) {
+            BigDecimal percentage = new BigDecimal(split.getSplitAmount());
+            splitAmount = checkAmount.multiply(percentage).divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP);
+        } else if ("AMOUNT".equalsIgnoreCase(splitsBy)) {
+            splitAmount = new BigDecimal(split.getSplitAmount());
+        }
+
+        return splitAmount;
+    }
+
+    private static EmployeeTransactionEntity buildTransaction(
+            final String procDate,
+            final String payrollTxnId,
+            final String employeeId,
+            final String pyrPayeeAcctId,
+            final String payeeNm,
+            final BigDecimal txnAmt,
+            final BigDecimal srcTxnAmt,
+            final PayrollStatus status,
+            final String srcEvtId,
+            final PaymentMethod paymentMethod,
+            final Timestamp now
+    ) {
+        EmployeeTransactionEntity entity = new EmployeeTransactionEntity();
+        EmployeeTransactionId id = new EmployeeTransactionId();
+        id.setPyrEmpTxnUUID(UUID.nameUUIDFromBytes((employeeId + " " + pyrPayeeAcctId).getBytes()).toString());
+        LocalDate dt = LocalDate.parse(procDate);
+        id.setProcDt(Timestamp.valueOf(dt.atStartOfDay()));
+        id.setIsn("N");
+
+        entity.setId(id);
+        entity.setSrcPayeeId(employeeId);
+        entity.setPyrPayeeAcctId(pyrPayeeAcctId);
+        entity.setTxnAmt(txnAmt);
+        entity.setPayeeName(payeeNm);
+        entity.setPayrollTxnStatusCd(status.getCode());
+        entity.setSrcEvtId(srcEvtId);
+        entity.setSrcTxnAmt(srcTxnAmt);
+        entity.setTxnInstrDtlId(null);
+        entity.setClntRefNb(null);
+        entity.setRefDescTxt(null);
+        entity.setTxnCatgCd(null);
+        entity.setPymtTypId(paymentMethod != null ? paymentMethod.name() : null);
+        entity.setPyrTxnId(payrollTxnId);
+
+        entity.setCreUsrId(SYSTEM_USER);
+        entity.setUpdUsrId(SYSTEM_USER);
+        entity.setCreTs(now);
+        entity.setUpdTs(now);
+
+        return entity;
+    }
+
+    private static Timestamp currentTimestamp() {
+        return Timestamp.from(Instant.now());
+    }
+}
+import net.jpmchase.payroll.processor.mapper.EmployeeTransactionMapper;
+import net.jpmchase.payroll.processor.model.*;
+import net.jpmchase.payroll.processor.enums.PaymentMethod;
+import net.jpmchase.payroll.processor.enums.PayrollStatus;
+import net.jpmchase.payroll.processor.exception.ProcessorException;
+import org.junit.jupiter.api.Test;
+
+import java.math.BigDecimal;
+import java.util.List;
+import java.util.Map;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+class EmployeeTransactionMapperTest {
+
+    @Test
+    void testMapAllFrom_WithSplits_ShouldGenerateTransactions() {
+        GetPayrollResponse response = TestFixtures.getPayrollResponseWithDirectDeposit();
+        List<EmployeeTransactionEntity> txns = EmployeeTransactionMapper.INSTANCE.mapAllFrom(
+                response,
+                response.getEmployeePaymentConfigurations(),
+                "proc-evt-id",
+                "evt-src-id",
+                TestFixtures.getBankAccountMap()
+        );
+
+        assertFalse(txns.isEmpty());
+        assertEquals(PayrollStatus.PENDING.name(), txns.get(0).getPayrollTxnStCd());
+    }
+
+    @Test
+    void testMapAllFrom_WithCheck_ShouldGenerateSingleTransactionWithoutSplit() {
+        GetPayrollResponse response = TestFixtures.getPayrollResponseWithCheckOnly();
+        List<EmployeeTransactionEntity> txns = EmployeeTransactionMapper.INSTANCE.mapAllFrom(
+                response,
+                response.getEmployeePaymentConfigurations(),
+                "proc-evt-id",
+                "evt-src-id",
+                Map.of()
+        );
+
+        assertEquals(1, txns.size());
+        assertEquals(PaymentMethod.Check.name(), txns.get(0).getTxnModeCd());
+    }
+
+    @Test
+    void testMapAllFrom_WhenSplitTotalMismatch_ShouldThrowException() {
+        GetPayrollResponse response = TestFixtures.getPayrollResponseWithInvalidSplitTotal();
+
+        ProcessorException exception = assertThrows(ProcessorException.class, () -> {
+            EmployeeTransactionMapper.INSTANCE.mapAllFrom(
+                    response,
+                    response.getEmployeePaymentConfigurations(),
+                    "proc-evt-id",
+                    "evt-src-id",
+                    TestFixtures.getBankAccountMap()
+            );
+        });
+
+        assertTrue(exception.getMessage().contains("SPLIT_AMOUNT_TOTAL_MISMATCH"));
+    }
+}
+public class TestFixtures {
+
+    public static EmployeeCompensations employeeCompensations() {
+        EmployeeCompensations emp = new EmployeeCompensations();
+        emp.setEmployeeId("emp-123");
+        emp.setPayeeName("John Doe");
+        emp.setCheckAmount(new BigDecimal("200.00"));
+        emp.setPaymentMethod(PaymentMethod.DirectDeposit);
+        return emp;
+    }
+
+    public static EmployeePaymentConfiguration directDepositConfig(Split split) {
+        EmployeePaymentConfiguration config = new EmployeePaymentConfiguration();
+        config.setSplits(List.of(split));
+        config.setPaymentMethod(PaymentMethod.DirectDeposit);
+        return config;
+    }
+
+    public static EmployeePaymentConfiguration checkConfig() {
+        EmployeePaymentConfiguration config = new EmployeePaymentConfiguration();
+        config.setPaymentMethod(PaymentMethod.Check);
+        config.setSplits(List.of()); // empty splits
+        return config;
+    }
+
+    public static GetPayrollResponse getPayrollResponseWithDirectDeposit() {
+        GetPayrollResponse res = new GetPayrollResponse();
+        res.setEmployeeCompensations(List.of(employeeCompensations()));
+        res.setEmployeePaymentConfigurations(List.of(directDepositConfig(directSplit())));
+        return res;
+    }
+
+    public static GetPayrollResponse getPayrollResponseWithCheckOnly() {
+        GetPayrollResponse res = new GetPayrollResponse();
+        EmployeeCompensations emp = employeeCompensations();
+        emp.setPaymentMethod(PaymentMethod.Check);
+        res.setEmployeeCompensations(List.of(emp));
+        res.setEmployeePaymentConfigurations(List.of(checkConfig()));
+        return res;
+    }
+
+    public static GetPayrollResponse getPayrollResponseWithInvalidSplitTotal() {
+        GetPayrollResponse res = getPayrollResponseWithDirectDeposit();
+        res.getEmployeeCompensations().get(0).setCheckAmount(new BigDecimal("200.00")); // actual
+        // Add invalid split of 150%
+        Split split = new Split();
+        split.setBankAccountUUID("bank-001");
+        split.setSplitBy("PERCENTAGE");
+        split.setSplitAmount(new BigDecimal("150"));
+        res.setEmployeePaymentConfigurations(List.of(directDepositConfig(split)));
+        return res;
+    }
+
+    public static Map<String, String> getBankAccountMap() {
+        return Map.of("bank-001", "acct-123");
+    }
+
+    private static Split directSplit() {
+        Split split = new Split();
+        split.setBankAccountUUID("bank-001");
+        split.setSplitBy("PERCENTAGE");
+        split.setSplitAmount(new BigDecimal("50"));
+        return split;
+    }
+}
+public static List<EmployeeTransactionEntity> generateEmployeeTransactions(
+    EmployeeCompensations emp,
+    EmployeePaymentConfiguration config,
+    Map<String, String> bankAccountToPayrollAccountMap,
+    String procDate,
+    String payrollTxnId,
+    String srcEventId,
+    BigDecimal checkAmount
+) {
+    List<EmployeeTransactionEntity> transactions = new ArrayList<>();
+    Timestamp now = currentTimestamp();
+    String splitBy = config.getSplitsBy();
+
+    List<Split> splits = config.getSplits();
+
+    // Handle CHECK (no splits)
+    if ((splits == null || splits.isEmpty()) && PaymentMethod.Check.name().equalsIgnoreCase(emp.getPaymentMethod().name())) {
+        transactions.add(buildTransaction(procDate, payrollTxnId, emp.getEmployeeId(), config.getPayeeAccountId(), config.getName(), checkAmount,
+                checkAmount, PayrollStatus.PENDING, srcEventId, emp.getPaymentMethod(), now));
+        return transactions;
+    }
+
+    // Sort by priority (ascending)
+    splits.sort(Comparator.comparing(Split::getPriority));
+
+    BigDecimal remainingAmount = checkAmount;
+
+    for (Split split : splits) {
+        BigDecimal splitAmount = BigDecimal.ZERO;
+
+        if ("PERCENTAGE".equalsIgnoreCase(splitBy)) {
+            BigDecimal percentage = new BigDecimal(split.getSplitAmount());
+            splitAmount = checkAmount.multiply(percentage).divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP);
+        } else if ("AMOUNT".equalsIgnoreCase(splitBy)) {
+            BigDecimal desired = new BigDecimal(split.getSplitAmount());
+            if (remainingAmount.compareTo(BigDecimal.ZERO) <= 0) break;
+
+            if (remainingAmount.compareTo(desired) >= 0) {
+                splitAmount = desired;
+            } else {
+                splitAmount = remainingAmount;
+            }
+
+            remainingAmount = remainingAmount.subtract(splitAmount);
+        }
+
+        if (splitAmount.compareTo(BigDecimal.ZERO) > 0) {
+            String payrollPayeeAcctId = bankAccountToPayrollAccountMap.get(split.getBankAccountUUID());
+            transactions.add(buildTransaction(procDate, payrollTxnId, emp.getEmployeeId(), payrollPayeeAcctId, config.getName(), splitAmount,
+                    checkAmount, PayrollStatus.PENDING, srcEventId, emp.getPaymentMethod(), now));
+        }
+    }
+
+    return transactions;
+}
+import net.jpmchase.payroll.processor.model.*;
+import net.jpmchase.payroll.processor.steps.enums.PayrollStatus;
+import net.jpmchase.payroll.processor.steps.enums.PaymentMethod;
+import net.jpmchase.payroll.processor.steps.utils.EmployeeTransactionUtil;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.math.BigDecimal;
+import java.sql.Timestamp;
+import java.time.Instant;
+import java.util.*;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+class EmployeeTransactionUtilTest {
+
+    private EmployeeCompensations compensation;
+    private EmployeePaymentConfiguration config;
+    private Map<String, String> bankAccountToPayeeAccountMap;
+    private String procDate;
+    private String payrollTxnId;
+    private String srcEventId;
+    private BigDecimal checkAmount;
+
+    @BeforeEach
+    void setup() {
+        procDate = "2025-06-01";
+        payrollTxnId = UUID.randomUUID().toString();
+        srcEventId = UUID.randomUUID().toString();
+
+        compensation = new EmployeeCompensations();
+        compensation.setEmployeeId("emp123");
+        compensation.setPayeeName("John Doe");
+        compensation.setPaymentMethod(PaymentMethod.DirectDeposit);
+        compensation.setCheckAmount(new BigDecimal("1000"));
+
+        config = new EmployeePaymentConfiguration();
+        config.setPayeeId("payee123");
+        config.setPayeeAccountId("acct123");
+        config.setSplitsBy("AMOUNT");
+        config.setSplits(new ArrayList<>());
+
+        bankAccountToPayeeAccountMap = new HashMap<>();
+        bankAccountToPayeeAccountMap.put("bank-1", "acct-1");
+        bankAccountToPayeeAccountMap.put("bank-2", "acct-2");
+    }
+
+    @Test
+    void shouldGenerateTransactionsBasedOnSplitAmounts() {
+        config.setSplits(List.of(
+                buildSplit("bank-1", "400", 1),
+                buildSplit("bank-2", "600", 2)
+        ));
+
+        List<EmployeeTransactionEntity> txns = EmployeeTransactionUtil.generateEmployeeTransactions(
+                compensation, config, bankAccountToPayeeAccountMap, procDate, payrollTxnId, srcEventId, new BigDecimal("1000")
+        );
+
+        assertEquals(2, txns.size());
+        assertEquals(new BigDecimal("400"), txns.get(0).getTxnAmt());
+        assertEquals(new BigDecimal("600"), txns.get(1).getTxnAmt());
+    }
+
+    @Test
+    void shouldRespectPriorityWhenCheckAmountIsLessThanSplitTotal() {
+        config.setSplits(List.of(
+                buildSplit("bank-1", "400", 1),
+                buildSplit("bank-2", "600", 2)
+        ));
+
+        List<EmployeeTransactionEntity> txns = EmployeeTransactionUtil.generateEmployeeTransactions(
+                compensation, config, bankAccountToPayeeAccountMap, procDate, payrollTxnId, srcEventId, new BigDecimal("300")
+        );
+
+        assertEquals(1, txns.size());
+        assertEquals("acct-1", txns.get(0).getPayrollPayeeAcctId());
+        assertEquals(new BigDecimal("300"), txns.get(0).getTxnAmt());
+    }
+
+    @Test
+    void shouldGenerateTransactionForCheckWithoutSplits() {
+        compensation.setPaymentMethod(PaymentMethod.Check);
+        config.setSplits(Collections.emptyList());
+
+        List<EmployeeTransactionEntity> txns = EmployeeTransactionUtil.generateEmployeeTransactions(
+                compensation, config, Collections.emptyMap(), procDate, payrollTxnId, srcEventId, new BigDecimal("850")
+        );
+
+        assertEquals(1, txns.size());
+        assertEquals(new BigDecimal("850"), txns.get(0).getTxnAmt());
+    }
+
+    @Test
+    void shouldReturnEmptyListWhenNoSplitsAndPaymentIsDirectDeposit() {
+        config.setSplits(Collections.emptyList());
+        compensation.setPaymentMethod(PaymentMethod.DirectDeposit);
+
+        List<EmployeeTransactionEntity> txns = EmployeeTransactionUtil.generateEmployeeTransactions(
+                compensation, config, Collections.emptyMap(), procDate, payrollTxnId, srcEventId, new BigDecimal("500")
+        );
+
+        assertTrue(txns.isEmpty());
+    }
+
+    @Test
+    void shouldSplitBasedOnPercentageIfConfigured() {
+        config.setSplitsBy("PERCENTAGE");
+        config.setSplits(List.of(
+                buildSplit("bank-1", "60", 1),
+                buildSplit("bank-2", "40", 2)
+        ));
+
+        List<EmployeeTransactionEntity> txns = EmployeeTransactionUtil.generateEmployeeTransactions(
+                compensation, config, bankAccountToPayeeAccountMap, procDate, payrollTxnId, srcEventId, new BigDecimal("1000")
+        );
+
+        assertEquals(2, txns.size());
+        assertEquals(new BigDecimal("600.00"), txns.get(0).getTxnAmt());
+        assertEquals(new BigDecimal("400.00"), txns.get(1).getTxnAmt());
+    }
+
+    private Split buildSplit(String bankUuid, String amount, int priority) {
+        Split split = new Split();
+        split.setBankAccountUUID(bankUuid);
+        split.setSplitAmount(amount);
+        split.setSplitBy("AMOUNT");
+        split.setPriority(priority);
+        split.setBankAccountName("Test Bank");
+        split.setRoutingNumber("987654321");
+        split.setAccountNumber("1234567890");
+        return split;
+    }
+}
+
+
+
