@@ -1,534 +1,166 @@
-public class EmployeeTransactionUtil {
+@ExtendWith(MockitoExtension.class)
+class ReconcileEmployeePaymentServiceTest {
 
-    public static List<EmployeeTransactionEntity> generateEmployeeTransactions(
-            final EmployeeCompensations emp,
-            final EmployeePaymentConfiguration config,
-            final Map<String, String> bankAccountToPayrollAccountMap,
-            final String procDate,
-            final String empTxnId,
-            final String srcEvtId,
-            final BigDecimal checkAmount
-    ) {
-        List<EmployeeTransactionEntity> transactions = new ArrayList<>();
-        String splitsBy = config.getSplitsBy();
-        Timestamp now = currentTimestamp();
+    @Mock private PayeeRepository payeeRepository;
+    @Mock private PayeeAccountRepository payeeAccountRepository;
+    @Mock private PayeePersistenceService payeePersistenceService;
+    @Mock private PayeeAccountPersistenceService payeeAccountPersistenceService;
+    @Mock private EmployeeService employeeService;
 
-        List<Split> splits = config.getSplits();
-        PaymentMethod paymentMethod = emp.getPaymentMethod();
+    @InjectMocks
+    private ReconcileEmployeePaymentService service;
 
-        if (splits != null && !splits.isEmpty()) {
-            for (Split split : splits) {
-                BigDecimal splitAmount = getSplitAmount(checkAmount, split, splitsBy);
-                transactions.add(buildTransaction(
-                        procDate, empTxnId, config.getEmployeeId(), bankAccountToPayrollAccountMap.get(split.getBankAccountUUID()),
-                        config.getPayeeName(), splitAmount, config.getSrcTxnAmt(), PayrollStatus.PENDING,
-                        srcEvtId, paymentMethod, now
-                ));
-            }
-        } else if (PaymentMethod.Check.name().equalsIgnoreCase(paymentMethod.name())) {
-            // If no splits and method is CHECK, create a single full transaction
-            transactions.add(buildTransaction(
-                    procDate, empTxnId, config.getEmployeeId(), null,
-                    config.getPayeeName(), checkAmount, config.getSrcTxnAmt(), PayrollStatus.PENDING,
-                    srcEvtId, paymentMethod, now
-            ));
-        }
-
-        return transactions;
-    }
-
-    private static BigDecimal getSplitAmount(BigDecimal checkAmount, Split split, String splitsBy) {
-        if (checkAmount == null) return BigDecimal.ZERO;
-
-        BigDecimal splitAmount = BigDecimal.ZERO;
-
-        if ("PERCENTAGE".equalsIgnoreCase(splitsBy)) {
-            BigDecimal percentage = new BigDecimal(split.getSplitAmount());
-            splitAmount = checkAmount.multiply(percentage).divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP);
-        } else if ("AMOUNT".equalsIgnoreCase(splitsBy)) {
-            splitAmount = new BigDecimal(split.getSplitAmount());
-        }
-
-        return splitAmount;
-    }
-
-    private static EmployeeTransactionEntity buildTransaction(
-            final String procDate,
-            final String payrollTxnId,
-            final String employeeId,
-            final String pyrPayeeAcctId,
-            final String payeeNm,
-            final BigDecimal txnAmt,
-            final BigDecimal srcTxnAmt,
-            final PayrollStatus status,
-            final String srcEvtId,
-            final PaymentMethod paymentMethod,
-            final Timestamp now
-    ) {
-        EmployeeTransactionEntity entity = new EmployeeTransactionEntity();
-        EmployeeTransactionId id = new EmployeeTransactionId();
-        id.setPyrEmpTxnUUID(UUID.nameUUIDFromBytes((employeeId + " " + pyrPayeeAcctId).getBytes()).toString());
-        LocalDate dt = LocalDate.parse(procDate);
-        id.setProcDt(Timestamp.valueOf(dt.atStartOfDay()));
-        id.setIsn("N");
-
-        entity.setId(id);
-        entity.setSrcPayeeId(employeeId);
-        entity.setPyrPayeeAcctId(pyrPayeeAcctId);
-        entity.setTxnAmt(txnAmt);
-        entity.setPayeeName(payeeNm);
-        entity.setPayrollTxnStatusCd(status.getCode());
-        entity.setSrcEvtId(srcEvtId);
-        entity.setSrcTxnAmt(srcTxnAmt);
-        entity.setTxnInstrDtlId(null);
-        entity.setClntRefNb(null);
-        entity.setRefDescTxt(null);
-        entity.setTxnCatgCd(null);
-        entity.setPymtTypId(paymentMethod != null ? paymentMethod.name() : null);
-        entity.setPyrTxnId(payrollTxnId);
-
-        entity.setCreUsrId(SYSTEM_USER);
-        entity.setUpdUsrId(SYSTEM_USER);
-        entity.setCreTs(now);
-        entity.setUpdTs(now);
-
-        return entity;
-    }
-
-    private static Timestamp currentTimestamp() {
-        return Timestamp.from(Instant.now());
-    }
-}
-import net.jpmchase.payroll.processor.mapper.EmployeeTransactionMapper;
-import net.jpmchase.payroll.processor.model.*;
-import net.jpmchase.payroll.processor.enums.PaymentMethod;
-import net.jpmchase.payroll.processor.enums.PayrollStatus;
-import net.jpmchase.payroll.processor.exception.ProcessorException;
-import org.junit.jupiter.api.Test;
-
-import java.math.BigDecimal;
-import java.util.List;
-import java.util.Map;
-
-import static org.junit.jupiter.api.Assertions.*;
-
-class EmployeeTransactionMapperTest {
-
-    @Test
-    void testMapAllFrom_WithSplits_ShouldGenerateTransactions() {
-        GetPayrollResponse response = TestFixtures.getPayrollResponseWithDirectDeposit();
-        List<EmployeeTransactionEntity> txns = EmployeeTransactionMapper.INSTANCE.mapAllFrom(
-                response,
-                response.getEmployeePaymentConfigurations(),
-                "proc-evt-id",
-                "evt-src-id",
-                TestFixtures.getBankAccountMap()
-        );
-
-        assertFalse(txns.isEmpty());
-        assertEquals(PayrollStatus.PENDING.name(), txns.get(0).getPayrollTxnStCd());
-    }
-
-    @Test
-    void testMapAllFrom_WithCheck_ShouldGenerateSingleTransactionWithoutSplit() {
-        GetPayrollResponse response = TestFixtures.getPayrollResponseWithCheckOnly();
-        List<EmployeeTransactionEntity> txns = EmployeeTransactionMapper.INSTANCE.mapAllFrom(
-                response,
-                response.getEmployeePaymentConfigurations(),
-                "proc-evt-id",
-                "evt-src-id",
-                Map.of()
-        );
-
-        assertEquals(1, txns.size());
-        assertEquals(PaymentMethod.Check.name(), txns.get(0).getTxnModeCd());
-    }
-
-    @Test
-    void testMapAllFrom_WhenSplitTotalMismatch_ShouldThrowException() {
-        GetPayrollResponse response = TestFixtures.getPayrollResponseWithInvalidSplitTotal();
-
-        ProcessorException exception = assertThrows(ProcessorException.class, () -> {
-            EmployeeTransactionMapper.INSTANCE.mapAllFrom(
-                    response,
-                    response.getEmployeePaymentConfigurations(),
-                    "proc-evt-id",
-                    "evt-src-id",
-                    TestFixtures.getBankAccountMap()
-            );
-        });
-
-        assertTrue(exception.getMessage().contains("SPLIT_AMOUNT_TOTAL_MISMATCH"));
-    }
-}
-public class TestFixtures {
-
-    public static EmployeeCompensations employeeCompensations() {
-        EmployeeCompensations emp = new EmployeeCompensations();
-        emp.setEmployeeId("emp-123");
-        emp.setPayeeName("John Doe");
-        emp.setCheckAmount(new BigDecimal("200.00"));
-        emp.setPaymentMethod(PaymentMethod.DirectDeposit);
-        return emp;
-    }
-
-    public static EmployeePaymentConfiguration directDepositConfig(Split split) {
-        EmployeePaymentConfiguration config = new EmployeePaymentConfiguration();
-        config.setSplits(List.of(split));
-        config.setPaymentMethod(PaymentMethod.DirectDeposit);
-        return config;
-    }
-
-    public static EmployeePaymentConfiguration checkConfig() {
-        EmployeePaymentConfiguration config = new EmployeePaymentConfiguration();
-        config.setPaymentMethod(PaymentMethod.Check);
-        config.setSplits(List.of()); // empty splits
-        return config;
-    }
-
-    public static GetPayrollResponse getPayrollResponseWithDirectDeposit() {
-        GetPayrollResponse res = new GetPayrollResponse();
-        res.setEmployeeCompensations(List.of(employeeCompensations()));
-        res.setEmployeePaymentConfigurations(List.of(directDepositConfig(directSplit())));
-        return res;
-    }
-
-    public static GetPayrollResponse getPayrollResponseWithCheckOnly() {
-        GetPayrollResponse res = new GetPayrollResponse();
-        EmployeeCompensations emp = employeeCompensations();
-        emp.setPaymentMethod(PaymentMethod.Check);
-        res.setEmployeeCompensations(List.of(emp));
-        res.setEmployeePaymentConfigurations(List.of(checkConfig()));
-        return res;
-    }
-
-    public static GetPayrollResponse getPayrollResponseWithInvalidSplitTotal() {
-        GetPayrollResponse res = getPayrollResponseWithDirectDeposit();
-        res.getEmployeeCompensations().get(0).setCheckAmount(new BigDecimal("200.00")); // actual
-        // Add invalid split of 150%
-        Split split = new Split();
-        split.setBankAccountUUID("bank-001");
-        split.setSplitBy("PERCENTAGE");
-        split.setSplitAmount(new BigDecimal("150"));
-        res.setEmployeePaymentConfigurations(List.of(directDepositConfig(split)));
-        return res;
-    }
-
-    public static Map<String, String> getBankAccountMap() {
-        return Map.of("bank-001", "acct-123");
-    }
-
-    private static Split directSplit() {
-        Split split = new Split();
-        split.setBankAccountUUID("bank-001");
-        split.setSplitBy("PERCENTAGE");
-        split.setSplitAmount(new BigDecimal("50"));
-        return split;
-    }
-}
-public static List<EmployeeTransactionEntity> generateEmployeeTransactions(
-    EmployeeCompensations emp,
-    EmployeePaymentConfiguration config,
-    Map<String, String> bankAccountToPayrollAccountMap,
-    String procDate,
-    String payrollTxnId,
-    String srcEventId,
-    BigDecimal checkAmount
-) {
-    List<EmployeeTransactionEntity> transactions = new ArrayList<>();
-    Timestamp now = currentTimestamp();
-    String splitBy = config.getSplitsBy();
-
-    List<Split> splits = config.getSplits();
-
-    // Handle CHECK (no splits)
-    if ((splits == null || splits.isEmpty()) && PaymentMethod.Check.name().equalsIgnoreCase(emp.getPaymentMethod().name())) {
-        transactions.add(buildTransaction(procDate, payrollTxnId, emp.getEmployeeId(), config.getPayeeAccountId(), config.getName(), checkAmount,
-                checkAmount, PayrollStatus.PENDING, srcEventId, emp.getPaymentMethod(), now));
-        return transactions;
-    }
-
-    // Sort by priority (ascending)
-    splits.sort(Comparator.comparing(Split::getPriority));
-
-    BigDecimal remainingAmount = checkAmount;
-
-    for (Split split : splits) {
-        BigDecimal splitAmount = BigDecimal.ZERO;
-
-        if ("PERCENTAGE".equalsIgnoreCase(splitBy)) {
-            BigDecimal percentage = new BigDecimal(split.getSplitAmount());
-            splitAmount = checkAmount.multiply(percentage).divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP);
-        } else if ("AMOUNT".equalsIgnoreCase(splitBy)) {
-            BigDecimal desired = new BigDecimal(split.getSplitAmount());
-            if (remainingAmount.compareTo(BigDecimal.ZERO) <= 0) break;
-
-            if (remainingAmount.compareTo(desired) >= 0) {
-                splitAmount = desired;
-            } else {
-                splitAmount = remainingAmount;
-            }
-
-            remainingAmount = remainingAmount.subtract(splitAmount);
-        }
-
-        if (splitAmount.compareTo(BigDecimal.ZERO) > 0) {
-            String payrollPayeeAcctId = bankAccountToPayrollAccountMap.get(split.getBankAccountUUID());
-            transactions.add(buildTransaction(procDate, payrollTxnId, emp.getEmployeeId(), payrollPayeeAcctId, config.getName(), splitAmount,
-                    checkAmount, PayrollStatus.PENDING, srcEventId, emp.getPaymentMethod(), now));
-        }
-    }
-
-    return transactions;
-}
-import net.jpmchase.payroll.processor.model.*;
-import net.jpmchase.payroll.processor.steps.enums.PayrollStatus;
-import net.jpmchase.payroll.processor.steps.enums.PaymentMethod;
-import net.jpmchase.payroll.processor.steps.utils.EmployeeTransactionUtil;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-
-import java.math.BigDecimal;
-import java.sql.Timestamp;
-import java.time.Instant;
-import java.util.*;
-
-import static org.junit.jupiter.api.Assertions.*;
-
-class EmployeeTransactionUtilTest {
-
-    private EmployeeCompensations compensation;
-    private EmployeePaymentConfiguration config;
-    private Map<String, String> bankAccountToPayeeAccountMap;
-    private String procDate;
-    private String payrollTxnId;
-    private String srcEventId;
-    private BigDecimal checkAmount;
+    private WorkflowContext context;
 
     @BeforeEach
     void setup() {
-        procDate = "2025-06-01";
-        payrollTxnId = UUID.randomUUID().toString();
-        srcEventId = UUID.randomUUID().toString();
-
-        compensation = new EmployeeCompensations();
-        compensation.setEmployeeId("emp123");
-        compensation.setPayeeName("John Doe");
-        compensation.setPaymentMethod(PaymentMethod.DirectDeposit);
-        compensation.setCheckAmount(new BigDecimal("1000"));
-
-        config = new EmployeePaymentConfiguration();
-        config.setPayeeId("payee123");
-        config.setPayeeAccountId("acct123");
-        config.setSplitsBy("AMOUNT");
-        config.setSplits(new ArrayList<>());
-
-        bankAccountToPayeeAccountMap = new HashMap<>();
-        bankAccountToPayeeAccountMap.put("bank-1", "acct-1");
-        bankAccountToPayeeAccountMap.put("bank-2", "acct-2");
+        MockitoAnnotations.openMocks(this);
+        context = new WorkflowContext();
+        context.put(WorkflowContextUtil.COMPANY_UUID, "comp1");
+        context.put(WorkflowContextUtil.PAYROLL_ENTITY, mock(PayrollEntity.class));
+        context.put(WorkflowContextUtil.COMPANY_ENROLLMENT, mock(EnrollmentEntity.class));
     }
 
     @Test
-    void shouldGenerateTransactionsBasedOnSplitAmounts() {
-        config.setSplits(List.of(
-                buildSplit("bank-1", "400", 1),
-                buildSplit("bank-2", "600", 2)
-        ));
+    void testReconcile_checkWithEmptySplits_shouldPass() {
+        EmployeeResponse employeeResponse = mock(EmployeeResponse.class);
+        when(employeeService.getEmployee(anyString(), eq("comp1"))).thenReturn(employeeResponse);
 
-        List<EmployeeTransactionEntity> txns = EmployeeTransactionUtil.generateEmployeeTransactions(
-                compensation, config, bankAccountToPayeeAccountMap, procDate, payrollTxnId, srcEventId, new BigDecimal("1000")
-        );
+        EmployeeCompensations comp = new EmployeeCompensations();
+        comp.setEmployeeUuid("emp1");
+        comp.setPaymentMethod(PaymentMethod.Check);
 
-        assertEquals(2, txns.size());
-        assertEquals(new BigDecimal("400"), txns.get(0).getTxnAmt());
-        assertEquals(new BigDecimal("600"), txns.get(1).getTxnAmt());
-    }
-
-    @Test
-    void shouldRespectPriorityWhenCheckAmountIsLessThanSplitTotal() {
-        config.setSplits(List.of(
-                buildSplit("bank-1", "400", 1),
-                buildSplit("bank-2", "600", 2)
-        ));
-
-        List<EmployeeTransactionEntity> txns = EmployeeTransactionUtil.generateEmployeeTransactions(
-                compensation, config, bankAccountToPayeeAccountMap, procDate, payrollTxnId, srcEventId, new BigDecimal("300")
-        );
-
-        assertEquals(1, txns.size());
-        assertEquals("acct-1", txns.get(0).getPayrollPayeeAcctId());
-        assertEquals(new BigDecimal("300"), txns.get(0).getTxnAmt());
-    }
-
-    @Test
-    void shouldGenerateTransactionForCheckWithoutSplits() {
-        compensation.setPaymentMethod(PaymentMethod.Check);
+        EmployeePaymentConfiguration config = new EmployeePaymentConfiguration();
+        config.setPaymentMethod(PaymentMethod.Check.name());
         config.setSplits(Collections.emptyList());
 
-        List<EmployeeTransactionEntity> txns = EmployeeTransactionUtil.generateEmployeeTransactions(
-                compensation, config, Collections.emptyMap(), procDate, payrollTxnId, srcEventId, new BigDecimal("850")
-        );
+        service.reconcile(comp, config, context);
 
-        assertEquals(1, txns.size());
-        assertEquals(new BigDecimal("850"), txns.get(0).getTxnAmt());
+        verifyNoInteractions(payeePersistenceService);
+        verifyNoInteractions(payeeAccountPersistenceService);
     }
 
     @Test
-    void shouldReturnEmptyListWhenNoSplitsAndPaymentIsDirectDeposit() {
+    void testReconcile_directDepositWithEmptySplits_shouldFail() {
+        EmployeeResponse mockEmployeeResponse = mock(EmployeeResponse.class);
+        when(employeeService.getEmployee(anyString(), anyString())).thenReturn(mockEmployeeResponse);
+
+        EmployeeCompensations comp = new EmployeeCompensations();
+        comp.setEmployeeUuid("emp2");
+        comp.setPaymentMethod(PaymentMethod.DirectDeposit);
+
+        EmployeePaymentConfiguration config = new EmployeePaymentConfiguration();
+        config.setPaymentMethod(PaymentMethod.DirectDeposit.name());
         config.setSplits(Collections.emptyList());
-        compensation.setPaymentMethod(PaymentMethod.DirectDeposit);
 
-        List<EmployeeTransactionEntity> txns = EmployeeTransactionUtil.generateEmployeeTransactions(
-                compensation, config, Collections.emptyMap(), procDate, payrollTxnId, srcEventId, new BigDecimal("500")
-        );
+        ProcessorException ex = assertThrows(ProcessorException.class, () ->
+            service.reconcile(comp, config, context));
 
-        assertTrue(txns.isEmpty());
+        assertTrue(ex.getMessage().contains("BANK_ACCOUNT_NOT_FOUND"));
     }
 
     @Test
-    void shouldSplitBasedOnPercentageIfConfigured() {
-        config.setSplitsBy("PERCENTAGE");
-        config.setSplits(List.of(
-                buildSplit("bank-1", "60", 1),
-                buildSplit("bank-2", "40", 2)
-        ));
+    void testReconcile_missingPayee_shouldSyncFromGusto() {
+        EmployeeCompensations comp = new EmployeeCompensations();
+        comp.setEmployeeUuid("emp3");
+        comp.setPaymentMethod(PaymentMethod.DirectDeposit);
 
-        List<EmployeeTransactionEntity> txns = EmployeeTransactionUtil.generateEmployeeTransactions(
-                compensation, config, bankAccountToPayeeAccountMap, procDate, payrollTxnId, srcEventId, new BigDecimal("1000")
-        );
-
-        assertEquals(2, txns.size());
-        assertEquals(new BigDecimal("600.00"), txns.get(0).getTxnAmt());
-        assertEquals(new BigDecimal("400.00"), txns.get(1).getTxnAmt());
-    }
-
-    private Split buildSplit(String bankUuid, String amount, int priority) {
         Split split = new Split();
-        split.setBankAccountUUID(bankUuid);
-        split.setSplitAmount(amount);
-        split.setSplitBy("AMOUNT");
-        split.setPriority(priority);
-        split.setBankAccountName("Test Bank");
-        split.setRoutingNumber("987654321");
-        split.setAccountNumber("1234567890");
-        return split;
+        split.setBankAccountUUID("uuid1");
+        split.setBankAccountName("ABC");
+        split.setRoutingNumber("123");
+        split.setAccountNumber("456");
+        split.setPriority(1);
+
+        EmployeePaymentConfiguration config = new EmployeePaymentConfiguration();
+        config.setPaymentMethod(PaymentMethod.DirectDeposit.name());
+        config.setSplits(List.of(split));
+
+        EmployeeResponse mockEmployeeResponse = mock(EmployeeResponse.class);
+        PayeeEntity mockPayee = new PayeeEntity();
+        mockPayee.setSrcPayeeId("emp3");
+
+        when(payeeRepository.findBySrcPayeeId("emp3")).thenReturn(Optional.empty());
+        when(employeeService.getEmployee(anyString(), eq("emp3"))).thenReturn(mockEmployeeResponse);
+        when(payeePersistenceService.saveAndFlushWithAudit(any())).thenReturn(mockPayee);
+        when(payeeAccountRepository.findBySourcePayeeId("emp3")).thenReturn(Optional.of(Collections.emptyList()));
+
+        service.reconcile(comp, config, context);
+
+        verify(payeePersistenceService).saveAndFlushWithAudit(any());
+        verify(payeeAccountPersistenceService).saveWithAudit(any(PayeeAccountEntity.class));
     }
-}
 
-package net.jpmchase.payroll.processor.steps.payee.gusto;
+    @Test
+    void testReconcile_existingPayeeAccountMismatch_shouldUpdate() {
+        EmployeeCompensations comp = new EmployeeCompensations();
+        comp.setEmployeeUuid("emp4");
+        comp.setPaymentMethod(PaymentMethod.DirectDeposit);
 
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-import net.jpmchase.payroll.processor.common.context.WorkflowContext;
-import net.jpmchase.payroll.processor.enums.ProcessorExceptionType;
-import net.jpmchase.payroll.processor.exception.ProcessorException;
-import net.jpmchase.payroll.processor.model.gusto.GetPayrollResponse;
-import net.jpmchase.payroll.processor.repository.enrl.entity.EnrollmentEntity;
-import net.jpmchase.payroll.processor.repository.mgmt.entity.PayrollEntity;
-import net.jpmchase.payroll.processor.service.gusto.retrieval.PayrollService;
-import org.springframework.stereotype.Component;
-import org.springframework.transaction.annotation.Transactional;
+        Split split = new Split();
+        split.setBankAccountUUID("uuid1");
+        split.setBankAccountName("Mismatch");
+        split.setRoutingNumber("999");
+        split.setAccountNumber("888");
+        split.setPriority(1);
 
-import java.time.LocalDate;
-import java.time.ZoneId;
-import java.util.Date;
+        EmployeePaymentConfiguration config = new EmployeePaymentConfiguration();
+        config.setPaymentMethod(PaymentMethod.DirectDeposit.name());
+        config.setSplits(List.of(split));
 
-import static net.jpmchase.payroll.processor.utils.ErrorCode.*;
-import static net.jpmchase.payroll.processor.utils.WorkflowContextUtil.*;
+        PayeeEntity payee = new PayeeEntity();
+        payee.setSrcPayeeId("emp4");
 
-@Component("ValidatePayrollStatusFromGusto")
-@RequiredArgsConstructor
-@Slf4j
-public class GustoPayrollRetrievalStep implements Step {
+        PayeeAccountEntity account = new PayeeAccountEntity();
+        account.setSrcBnkId("uuid1");
+        account.setBnkNm("Different");
+        account.setRtnb("777");
+        account.setActNb("666");
+        account.setPyrPayeeAcctId("acct-1");
 
-    private final PayrollService payrollService;
+        EmployeeResponse employeeResponse = new EmployeeResponse();
 
-    @Override
-    @Transactional
-    public void execute(WorkflowContext context) {
-        final String payrollUuid = context.get(PYRL_UUID, String.class);
-        final String companyId = context.get(COMPANY_UUID, String.class);
-        final EnrollmentEntity enrollmentEntity = context.get(COMPANY_ENROLLMENT, EnrollmentEntity.class);
-        final PayrollEntity payrollEntity = context.get(PAYROLL_ENTITY, PayrollEntity.class);
+        when(payeeRepository.findBySrcPayeeId("emp4")).thenReturn(Optional.of(payee));
+        when(payeeAccountRepository.findBySourcePayeeId("emp4")).thenReturn(Optional.of(List.of(account)));
+        when(employeeService.getEmployee(anyString(), anyString())).thenReturn(employeeResponse);
 
-        log.info("[STEP] Validating payroll status from Gusto for companyId={}, payrollUuid={}", companyId, payrollUuid);
-        final GetPayrollResponse payrollResponse = payrollService.getSinglePayroll(enrollmentEntity.getRelEntPtyId(), companyId, payrollUuid);
+        service.reconcile(comp, config, context);
 
-        if (payrollResponse == null || !payrollResponse.isProcessed()) {
-            log.info("[STEP] Payroll status is not 'processed' for payrollUuid={}. Skipping processing.", payrollUuid);
-            throw new ProcessorException(ProcessorExceptionType.BUSINESS_VALIDATION,
-                    INVALID_PAYROLL_STATUS.getCode(),
-                    INVALID_PAYROLL_STATUS.formatMessage(payrollUuid));
-        }
-
-        // === Enhancement: Validate calculatedDate match ===
-        LocalDate gustoCalculatedDate = payrollResponse.getCalculatedDate();
-        LocalDate entityCalculatedDate = payrollEntity.getCalculatedDate().toInstant()
-                .atZone(ZoneId.systemDefault())
-                .toLocalDate();
-
-        if (!gustoCalculatedDate.equals(entityCalculatedDate)) {
-            log.warn("[STEP] Calculated date mismatch: Gusto={}, DB={}", gustoCalculatedDate, entityCalculatedDate);
-            throw new ProcessorException(ProcessorExceptionType.BUSINESS_VALIDATION,
-                    INVALID_PAYROLL_CALCULATION_DATE.getCode(),
-                    INVALID_PAYROLL_CALCULATION_DATE.formatMessage(payrollUuid, gustoCalculatedDate, entityCalculatedDate));
-        }
-
-        context.put(GUSTO_SINGLE_PAYROLL, payrollResponse);
-        log.info("[STEP] Payroll status is 'processed' and calculation date matched for payrollUuid={}. Proceeding.", payrollUuid);
+        verify(payeeAccountPersistenceService, atLeastOnce()).saveWithAudit(any(PayeeAccountEntity.class));
     }
-}
-INVALID_PAYROLL_CALCULATION_DATE("ERR_INVALID_PAYROLL_CALC_DATE", "Calculated date mismatch for payrollId={} - Gusto={}, DB={}");
-@Component("ValidatePayrollStatusFromGusto")
-@RequiredArgsConstructor
-@Slf4j
-public class GustoPayrollRetrievalStep implements Step {
 
-    private final PayrollService payrollService;
+    @Test
+    void testReconcile_allValid_shouldSucceed() {
+        EmployeeCompensations comp = new EmployeeCompensations();
+        comp.setEmployeeUuid("emp5");
+        comp.setPaymentMethod(PaymentMethod.DirectDeposit);
 
-    @Override
-    public void execute(WorkflowContext context) {
-        final String payrollUuid = context.get(PYRL_UUID, String.class);
-        final String companyId = context.get(COMPANY_UUID, String.class);
-        final EnrollmentEntity enrollmentEntity = context.get(COMPANY_ENROLLMENT, EnrollmentEntity.class);
-        final PayrollEntity payrollEntity = context.get(PAYROLL_ENTITY, PayrollEntity.class);
+        Split split = new Split();
+        split.setBankAccountUUID("uuid1");
+        split.setBankAccountName("BankX");
+        split.setRoutingNumber("123");
+        split.setAccountNumber("456");
+        split.setPriority(1);
 
-        log.info("[STEP] Validating payroll status from Gusto for companyId={}, payrollUuid={}", companyId, payrollUuid);
+        EmployeePaymentConfiguration config = new EmployeePaymentConfiguration();
+        config.setPaymentMethod(PaymentMethod.DirectDeposit.name());
+        config.setSplits(List.of(split));
 
-        final GetPayrollResponse payrollResponse = payrollService.getSinglePayroll(enrollmentEntity.getRelEntPtyId(), companyId, payrollUuid);
+        PayeeEntity payee = new PayeeEntity();
+        payee.setSrcPayeeId("emp5");
 
-        if (payrollResponse == null || !payrollResponse.isProcessed()) {
-            log.info("[STEP] Payroll status is not 'processed' for payrollUuid={}. Skipping processing.", payrollUuid);
-            throw ProcessorException.of(
-                ProcessorExceptionType.BUSINESS_VALIDATION,
-                INVALID_PAYROLL_STATUS.getCode(),
-                INVALID_PAYROLL_STATUS.formatMessage(payrollUuid)
-            );
-        }
+        PayeeAccountEntity account = new PayeeAccountEntity();
+        account.setSrcBnkId("uuid1");
+        account.setBnkNm("BankX");
+        account.setRtnb("123");
+        account.setActNb("456");
 
-        // ✅ Enhancement: Compare Gusto calculatedAt date with entity calculatedDate
-        final String calculatedAtStr = payrollResponse.getCalculatedAt(); // ISO-8601 string
-        final LocalDate gustoCalculatedDate = OffsetDateTime
-            .parse(calculatedAtStr)
-            .atZoneSameInstant(ZoneId.of("UTC"))
-            .toLocalDate();
+        when(payeeRepository.findBySrcPayeeId("emp5")).thenReturn(Optional.of(payee));
+        when(payeeAccountRepository.findBySourcePayeeId("emp5")).thenReturn(Optional.of(List.of(account)));
+        when(employeeService.getEmployee(anyString(), anyString())).thenReturn(new EmployeeResponse());
 
-        final LocalDate entityCalculatedDate = payrollEntity.getCalculatedDate()
-            .toInstant()
-            .atZone(ZoneId.of("UTC"))
-            .toLocalDate();
+        service.reconcile(comp, config, context);
 
-        if (!gustoCalculatedDate.equals(entityCalculatedDate)) {
-            log.warn("[STEP] Mismatch in calculated date: Gusto={}, DB={}", gustoCalculatedDate, entityCalculatedDate);
-            throw ProcessorException.of(
-                ProcessorExceptionType.BUSINESS_VALIDATION,
-                INVALID_PAYROLL_STATUS.getCode(),
-                String.format("Mismatch in calculated date for payrollUuid=%s. Gusto=%s, DB=%s",
-                    payrollUuid, gustoCalculatedDate, entityCalculatedDate)
-            );
-        }
-
-        context.put(GUSTO_SINGLE_PAYROLL, payrollResponse);
-        log.info("[STEP] Payroll status is 'processed' for payrollUuid={}. Proceeding.", payrollUuid);
+        verify(payeeAccountPersistenceService, never()).saveWithAudit(any());
     }
 }
