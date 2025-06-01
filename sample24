@@ -479,4 +479,56 @@ public class GustoPayrollRetrievalStep implements Step {
     }
 }
 INVALID_PAYROLL_CALCULATION_DATE("ERR_INVALID_PAYROLL_CALC_DATE", "Calculated date mismatch for payrollId={} - Gusto={}, DB={}");
+@Component("ValidatePayrollStatusFromGusto")
+@RequiredArgsConstructor
+@Slf4j
+public class GustoPayrollRetrievalStep implements Step {
 
+    private final PayrollService payrollService;
+
+    @Override
+    public void execute(WorkflowContext context) {
+        final String payrollUuid = context.get(PYRL_UUID, String.class);
+        final String companyId = context.get(COMPANY_UUID, String.class);
+        final EnrollmentEntity enrollmentEntity = context.get(COMPANY_ENROLLMENT, EnrollmentEntity.class);
+        final PayrollEntity payrollEntity = context.get(PAYROLL_ENTITY, PayrollEntity.class);
+
+        log.info("[STEP] Validating payroll status from Gusto for companyId={}, payrollUuid={}", companyId, payrollUuid);
+
+        final GetPayrollResponse payrollResponse = payrollService.getSinglePayroll(enrollmentEntity.getRelEntPtyId(), companyId, payrollUuid);
+
+        if (payrollResponse == null || !payrollResponse.isProcessed()) {
+            log.info("[STEP] Payroll status is not 'processed' for payrollUuid={}. Skipping processing.", payrollUuid);
+            throw ProcessorException.of(
+                ProcessorExceptionType.BUSINESS_VALIDATION,
+                INVALID_PAYROLL_STATUS.getCode(),
+                INVALID_PAYROLL_STATUS.formatMessage(payrollUuid)
+            );
+        }
+
+        // ✅ Enhancement: Compare Gusto calculatedAt date with entity calculatedDate
+        final String calculatedAtStr = payrollResponse.getCalculatedAt(); // ISO-8601 string
+        final LocalDate gustoCalculatedDate = OffsetDateTime
+            .parse(calculatedAtStr)
+            .atZoneSameInstant(ZoneId.of("UTC"))
+            .toLocalDate();
+
+        final LocalDate entityCalculatedDate = payrollEntity.getCalculatedDate()
+            .toInstant()
+            .atZone(ZoneId.of("UTC"))
+            .toLocalDate();
+
+        if (!gustoCalculatedDate.equals(entityCalculatedDate)) {
+            log.warn("[STEP] Mismatch in calculated date: Gusto={}, DB={}", gustoCalculatedDate, entityCalculatedDate);
+            throw ProcessorException.of(
+                ProcessorExceptionType.BUSINESS_VALIDATION,
+                INVALID_PAYROLL_STATUS.getCode(),
+                String.format("Mismatch in calculated date for payrollUuid=%s. Gusto=%s, DB=%s",
+                    payrollUuid, gustoCalculatedDate, entityCalculatedDate)
+            );
+        }
+
+        context.put(GUSTO_SINGLE_PAYROLL, payrollResponse);
+        log.info("[STEP] Payroll status is 'processed' for payrollUuid={}. Proceeding.", payrollUuid);
+    }
+}
