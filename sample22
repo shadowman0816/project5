@@ -1,0 +1,76 @@
+@Component
+@RequiredArgsConstructor
+@Slf4j
+public class ReconcileEmployeePaymentInformationStep implements Step {
+
+    private final ReconcileEmployeePaymentService reconcileService;
+    private final EmployeePaymentConfigurationService paymentConfigurationService;
+    private final PayeeAccountRepository payeeAccountRepository;
+    private final PayeeRepository payeeRepository;
+    private final PayeePersistenceService employeeAccountPersistenceService;
+
+    @Override
+    public void execute(WorkflowContext context) {
+        if (Boolean.TRUE.equals(context.get(CANCEL_GUSTO_PAYROLL, Boolean.class))) {
+            log.info("[STEP] Skipping step ReconcileEmployeePaymentInformationStep due to failed condition evaluation.");
+            return;
+        }
+
+        final GetPayrollResponse payrollResponse = context.get(GUSTO_SINGLE_PAYROLL, GetPayrollResponse.class);
+        final EnrollmentEntity enrollmentEntity = context.get(PAYROLL_ENTITY, EnrollmentEntity.class);
+        final String companyId = context.get(COMPANY_UUID, String.class);
+        final String payrollId = context.get(PYRL_UUID, String.class);
+
+        if (payrollResponse.getEmployeeCompensations() == null) {
+            log.info("[STEP] No Employee compensations from Gusto. Reconcile step skipped for companyId={}", companyId);
+            return;
+        }
+
+        List<EmployeePaymentConfiguration> configs = paymentConfigurationService
+            .getPaymentConfigurationsForAllEmployees(enrollmentEntity.getEntPrtyId(), UUID.fromString(companyId), UUID.fromString(payrollId));
+
+        Map<String, List<EmployeePaymentConfiguration>> configMap = configs.stream()
+            .collect(Collectors.groupingBy(EmployeePaymentConfiguration::getEmployeeId));
+
+        List<PayeeAccountEntity> payeeAccounts = new ArrayList<>();
+
+        for (EmployeeCompensation comp : payrollResponse.getEmployeeCompensations()) {
+            String employeeId = comp.getEmployeeId();
+            List<EmployeePaymentConfiguration> employeeConfigs = configMap.get(employeeId);
+
+            if (employeeConfigs == null || employeeConfigs.isEmpty()) {
+                throw new ProcessorException(ErrorCode.EMPLOYEE_CONFIG_API_MISMATCH_WITH_SINGLE_PYRL_GUSTO,
+                        "No EmployeePaymentConfiguration found for employeeId=" + employeeId);
+            }
+
+            for (EmployeePaymentConfiguration config : employeeConfigs) {
+                // Check and create payee if not exists
+                Optional<PayeeEntity> payeeOpt = payeeRepository.findBySourcePayeeId(config.getEmployeeId());
+                PayeeEntity payee = payeeOpt.orElseGet(() -> {
+                    log.info("Creating new payee for employeeId={} and companyId={}", config.getEmployeeId(), companyId);
+                    return employeeAccountPersistenceService.savePayee(config.getEmployeeId(), enrollmentEntity.getEntPrtyId());
+                });
+
+                // Check and create payee account if not exists
+                Optional<PayeeAccountEntity> payeeAccountOpt = payeeAccountRepository
+                        .findBySourcePayeeIdAndBankAccountUUID(config.getEmployeeId(), config.getBankAccountUUID());
+
+                if (payeeAccountOpt.isEmpty()) {
+                    log.info("Creating payee account for employeeId={} and account={}", config.getEmployeeId(), config.getBankAccountUUID());
+                    PayeeAccountEntity account = employeeAccountPersistenceService.savePayeeAccount(payee.getPayeeId(), config);
+                    payeeAccounts.add(account);
+                } else {
+                    payeeAccounts.add(payeeAccountOpt.get());
+                }
+            }
+        }
+
+        Map<String, String> bankAccountToPayeeAccountMap =
+                reconcileService.getBankAccountToPayeeAccountMap(configMap, payeeAccounts);
+
+        context.put(BANK_ACCOUNT_TO_PAYEE_ACCOUNT_MAP, bankAccountToPayeeAccountMap);
+        context.put(PAYROLL_EMP_CONFIGURATIONS, configs);
+
+        log.info("[STEP] ReconcileEmployeePaymentInformationStep completed for companyId={}", companyId);
+    }
+}
