@@ -1,0 +1,70 @@
+public static EmployeeResponse sample() {
+    EmployeeResponse response = new EmployeeResponse();
+
+    response.setUuid("emp-1234567890");
+    response.setCompanyId("comp-9876543210");
+    response.setManagerId("mgr-1122334455");
+    response.setDepartment("Engineering");
+    response.setTerminated(false);
+    response.setTwoPercentShareholderIndicator(true);
+    response.setOnboarded(true);
+
+    response.setWorkEmail("john.doe@example.com");
+    response.setCurrentEmploymentStatus("full_time");
+
+    // Custom Fields
+    CustomField customField = new CustomField();
+    customField.setId("cf-001");
+    customField.setCompanyCustomFieldId("ccf-001");
+    customField.setName("Hobby");
+    customField.setType("text");
+    customField.setDescription("Employee hobby");
+    customField.setValue("Photography");
+    customField.setSelectionOptions(Arrays.asList("Photography", "Travel", "Reading"));
+    response.setCustomFields(Set.of(customField));
+
+    // Garnishment
+    Garnishment garnishment = new Garnishment();
+    garnishment.setUuid("garn-123");
+    garnishment.setVersion("v1");
+    garnishment.setEmployeeUuid("emp-1234567890");
+    garnishment.setActive(true);
+    garnishment.setAmount("50.00");
+    garnishment.setDescription("Student loan garnishment");
+    garnishment.setCourtOrdered(true);
+    response.setGarnishments(Set.of(garnishment));
+
+    // Child Support
+    ChildSupport childSupport = new ChildSupport();
+    childSupport.setState("NY");
+    childSupport.setPaymentPeriod("Monthly");
+    childSupport.setFipsCode("36001");
+    childSupport.setCaseNumber("CSN-789");
+    childSupport.setOrderNumber("ORD-456");
+    childSupport.setRemittanceNumber("REM-123");
+    response.setChildSupports(Set.of(childSupport));
+
+    // Termination
+    Termination termination = new Termination();
+    termination.setUuid("term-456");
+    termination.setVersion("v2");
+    termination.setEmployeeUuid("emp-1234567890");
+    termination.setActive(false);
+    termination.setCancelable(true);
+    termination.setEffectiveDate("2025-07-01");
+    termination.setRunTerminationPayrollIndicator(true);
+    response.setTerminations(Set.of(termination));
+
+    // Paid Time Off
+    PaidTimeOff pto = new PaidTimeOff();
+    pto.setAccrualUnit("hours");
+    pto.setAccrualRate("8");
+    pto.setAccrualMethod("monthly");
+    pto.setAccrualPeriod("monthly");
+    pto.setAccrualBalance("16");
+    pto.setMaximumAccrualBalance("120");
+    pto.setPaidAtTerminationIndicator(true);
+    response.setEligiblePaidTimeOff(Set.of(pto));
+
+    return response;
+}
