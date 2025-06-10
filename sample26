@@ -68,3 +68,125 @@ public static EmployeeResponse sample() {
 
     return response;
 }
+import net.jpmchase.payroll.processor.service.persistence.EmployeeTransactionPersistenceService;
+import net.jpmchase.payroll.processor.repository.EmployeeTransactionRepository;
+import net.jpmchase.payroll.processor.repository.EmployeeTransactionAuditRepository;
+import net.jpmchase.payroll.processor.model.entity.EmployeeTransactionEntity;
+import net.jpmchase.payroll.processor.model.entity.EmployeeTransactionAuditEntity;
+import net.jpmchase.payroll.processor.mapper.EmployeeTransactionAuditMapper;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
+
+import java.util.List;
+import java.util.Collections;
+
+import static org.mockito.Mockito.*;
+import static org.junit.jupiter.api.Assertions.*;
+
+class EmployeeTransactionPersistenceServiceTest {
+
+    private EmployeeTransactionRepository employeeTransactionRepository;
+    private EmployeeTransactionAuditRepository employeeTransactionAuditRepository;
+    private EmployeeTransactionPersistenceService persistenceService;
+
+    @BeforeEach
+    void setUp() {
+        employeeTransactionRepository = mock(EmployeeTransactionRepository.class);
+        employeeTransactionAuditRepository = mock(EmployeeTransactionAuditRepository.class);
+        persistenceService = new EmployeeTransactionPersistenceService(employeeTransactionRepository, employeeTransactionAuditRepository);
+    }
+
+    @Test
+    void testSave() {
+        EmployeeTransactionEntity entity = new EmployeeTransactionEntity();
+        when(employeeTransactionRepository.save(entity)).thenReturn(entity);
+
+        EmployeeTransactionEntity result = persistenceService.save(entity);
+        assertNotNull(result);
+        assertEquals(entity, result);
+        verify(employeeTransactionRepository).save(entity);
+    }
+
+    @Test
+    void testSaveAndFlush() {
+        EmployeeTransactionEntity entity = new EmployeeTransactionEntity();
+        when(employeeTransactionRepository.saveAndFlush(entity)).thenReturn(entity);
+
+        EmployeeTransactionEntity result = persistenceService.saveAndFlush(entity);
+        assertNotNull(result);
+        assertEquals(entity, result);
+        verify(employeeTransactionRepository).saveAndFlush(entity);
+    }
+
+    @Test
+    void testSaveAll() {
+        List<EmployeeTransactionEntity> entities = List.of(new EmployeeTransactionEntity());
+        when(employeeTransactionRepository.saveAll(entities)).thenReturn(entities);
+
+        List<EmployeeTransactionEntity> result = persistenceService.saveALL(entities);
+        assertEquals(entities.size(), result.size());
+        verify(employeeTransactionRepository).saveAll(entities);
+    }
+
+    @Test
+    void testSaveAllAndFlush() {
+        List<EmployeeTransactionEntity> entities = List.of(new EmployeeTransactionEntity());
+        when(employeeTransactionRepository.saveAllAndFlush(entities)).thenReturn(entities);
+
+        List<EmployeeTransactionEntity> result = persistenceService.saveALLAndFlush(entities);
+        assertEquals(entities.size(), result.size());
+        verify(employeeTransactionRepository).saveAllAndFlush(entities);
+    }
+
+    @Test
+    void testSaveAllWithAudit() {
+        EmployeeTransactionEntity entity = new EmployeeTransactionEntity();
+        List<EmployeeTransactionEntity> entities = List.of(entity);
+
+        EmployeeTransactionAuditEntity auditEntity = new EmployeeTransactionAuditEntity();
+        EmployeeTransactionAuditMapper mapperMock = mock(EmployeeTransactionAuditMapper.class);
+        setAuditMapperSingleton(mapperMock);
+
+        when(mapperMock.toAuditEntity(entity)).thenReturn(auditEntity);
+        when(employeeTransactionRepository.saveAll(entities)).thenReturn(entities);
+        when(employeeTransactionAuditRepository.saveAll(List.of(auditEntity))).thenReturn(List.of(auditEntity));
+
+        List<EmployeeTransactionEntity> result = persistenceService.saveALLWithAudit(entities);
+
+        assertEquals(entities.size(), result.size());
+        verify(employeeTransactionRepository).saveAll(entities);
+        verify(employeeTransactionAuditRepository).saveAll(List.of(auditEntity));
+    }
+
+    @Test
+    void testSaveAllAndFlushWithAudit() {
+        EmployeeTransactionEntity entity = new EmployeeTransactionEntity();
+        List<EmployeeTransactionEntity> entities = List.of(entity);
+
+        EmployeeTransactionAuditEntity auditEntity = new EmployeeTransactionAuditEntity();
+        EmployeeTransactionAuditMapper mapperMock = mock(EmployeeTransactionAuditMapper.class);
+        setAuditMapperSingleton(mapperMock);
+
+        when(mapperMock.toAuditEntity(entity)).thenReturn(auditEntity);
+        when(employeeTransactionRepository.saveAllAndFlush(entities)).thenReturn(entities);
+        when(employeeTransactionAuditRepository.saveAll(List.of(auditEntity))).thenReturn(List.of(auditEntity));
+
+        List<EmployeeTransactionEntity> result = persistenceService.saveAndFlushALLWithAudit(entities);
+
+        assertEquals(entities.size(), result.size());
+        verify(employeeTransactionRepository).saveAllAndFlush(entities);
+        verify(employeeTransactionAuditRepository).saveAll(List.of(auditEntity));
+    }
+
+    // --- Helper to override singleton INSTANCE (for testing only) ---
+    private void setAuditMapperSingleton(EmployeeTransactionAuditMapper mapperMock) {
+        try {
+            var instanceField = EmployeeTransactionAuditMapper.class.getDeclaredField("INSTANCE");
+            instanceField.setAccessible(true);
+            instanceField.set(null, mapperMock);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to mock EmployeeTransactionAuditMapper.INSTANCE", e);
+        }
+    }
+}
