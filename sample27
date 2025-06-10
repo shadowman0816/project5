@@ -354,3 +354,56 @@ class CustomerInternalEligibilityValidationStepTest {
         assertTrue(ex.getMessage().contains("DAILY_LIMIT_EXCEEDED"));
     }
 }
+package net.jpmchase.payroll.processor.steps.payroll;
+
+import net.jpmchase.payroll.processor.entity.EnrollmentEntity;
+import net.jpmchase.payroll.processor.entity.PayrollEntity;
+import net.jpmchase.payroll.processor.enums.PayrollStatus;
+import net.jpmchase.payroll.processor.service.PayrollService;
+import net.jpmchase.payroll.processor.service.persistence.PayrollPersistenceService;
+import net.jpmchase.payroll.processor.util.WorkflowContext;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import static org.mockito.Mockito.*;
+
+public class PayrollCancelStepTest {
+
+    private PayrollService payrollService;
+    private PayrollPersistenceService payrollPersistenceService;
+    private PayrollCancelStep step;
+
+    @BeforeEach
+    void setUp() {
+        payrollService = mock(PayrollService.class);
+        payrollPersistenceService = mock(PayrollPersistenceService.class);
+        step = new PayrollCancelStep(payrollService, payrollPersistenceService);
+    }
+
+    @Test
+    void testExecute_shouldCancelPayrollSuccessfully() {
+        // Arrange
+        WorkflowContext context = mock(WorkflowContext.class);
+
+        String payrollUuid = "payroll-123";
+        String companyUuid = "company-456";
+
+        EnrollmentEntity enrollmentEntity = new EnrollmentEntity();
+        PayrollEntity payrollEntity = new PayrollEntity();
+        payrollEntity.setEntPtyId("ent-789");
+
+        when(context.get("PAYROLL_UUID", String.class)).thenReturn(payrollUuid);
+        when(context.get("COMPANY_UUID", String.class)).thenReturn(companyUuid);
+        when(context.get("COMPANY_ENROLLMENT", EnrollmentEntity.class)).thenReturn(enrollmentEntity);
+        when(context.get("PAYROLL_ENTITY", PayrollEntity.class)).thenReturn(payrollEntity);
+
+        // Act
+        step.execute(context);
+
+        // Assert
+        verify(payrollService).cancelPayroll("ent-789", companyUuid, payrollUuid);
+        verify(payrollPersistenceService).saveWithAudit(argThat(entity ->
+                entity.getPtyRlStCd().equals(PayrollStatus.CANCELLED.getCode())
+        ));
+    }
+}
