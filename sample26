@@ -190,3 +190,131 @@ class EmployeeTransactionPersistenceServiceTest {
         }
     }
 }
+import net.jpmchase.payroll.processor.model.entity.PayrollEntity;
+import net.jpmchase.payroll.processor.model.entity.PayrollAuditEntity;
+import net.jpmchase.payroll.processor.repository.PayrollRepository;
+import net.jpmchase.payroll.processor.repository.PayrollAuditRepository;
+import net.jpmchase.payroll.processor.mapper.PayrollAuditMapper;
+import net.jpmchase.payroll.processor.service.persistence.PayrollPersistenceService;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.util.List;
+import java.util.Optional;
+
+import static org.mockito.Mockito.*;
+import static org.junit.jupiter.api.Assertions.*;
+
+class PayrollPersistenceServiceTest {
+
+    private PayrollRepository payrollRepository;
+    private PayrollAuditRepository payrollAuditRepository;
+    private PayrollAuditMapper payrollAuditMapper;
+    private PayrollPersistenceService service;
+
+    @BeforeEach
+    void setup() {
+        payrollRepository = mock(PayrollRepository.class);
+        payrollAuditRepository = mock(PayrollAuditRepository.class);
+        payrollAuditMapper = mock(PayrollAuditMapper.class);
+        service = new PayrollPersistenceService(payrollRepository, payrollAuditRepository);
+    }
+
+    @Test
+    void testSave() {
+        PayrollEntity entity = new PayrollEntity();
+        when(payrollRepository.save(entity)).thenReturn(entity);
+
+        PayrollEntity result = service.save(entity);
+        assertNotNull(result);
+        assertEquals(entity, result);
+        verify(payrollRepository).save(entity);
+    }
+
+    @Test
+    void testSaveAndFlush() {
+        PayrollEntity entity = new PayrollEntity();
+        when(payrollRepository.saveAndFlush(entity)).thenReturn(entity);
+
+        PayrollEntity result = service.saveAndFlush(entity);
+        assertNotNull(result);
+        assertEquals(entity, result);
+        verify(payrollRepository).saveAndFlush(entity);
+    }
+
+    @Test
+    void testSaveAll() {
+        List<PayrollEntity> entities = List.of(new PayrollEntity());
+        when(payrollRepository.saveAll(entities)).thenReturn(entities);
+
+        List<PayrollEntity> result = service.saveALL(entities);
+        assertEquals(entities, result);
+        verify(payrollRepository).saveAll(entities);
+    }
+
+    @Test
+    void testSaveAllAndFlush() {
+        List<PayrollEntity> entities = List.of(new PayrollEntity());
+        when(payrollRepository.saveAllAndFlush(entities)).thenReturn(entities);
+
+        List<PayrollEntity> result = service.saveALLAndFlush(entities);
+        assertEquals(entities, result);
+        verify(payrollRepository).saveAllAndFlush(entities);
+    }
+
+    @Test
+    void testSaveWithAudit() {
+        PayrollEntity entity = new PayrollEntity();
+        PayrollAuditEntity auditEntity = new PayrollAuditEntity();
+
+        // Inject mapper via reflection if using static final singleton
+        setMapperInstance(auditEntity, entity);
+
+        when(payrollAuditRepository.saveAndFlush(auditEntity)).thenReturn(auditEntity);
+        when(payrollRepository.saveAndFlush(entity)).thenReturn(entity);
+
+        PayrollEntity result = service.saveWithAudit(entity);
+        assertEquals(entity, result);
+    }
+
+    @Test
+    void testSaveAllWithAudit() {
+        PayrollEntity entity = new PayrollEntity();
+        PayrollAuditEntity auditEntity = new PayrollAuditEntity();
+
+        List<PayrollEntity> entities = List.of(entity);
+        List<PayrollAuditEntity> audits = List.of(auditEntity);
+
+        setMapperInstance(auditEntity, entity);
+
+        when(payrollAuditRepository.saveAll(audits)).thenReturn(audits);
+        when(payrollRepository.saveAll(entities)).thenReturn(entities);
+
+        List<PayrollEntity> result = service.saveALLWithAudit(entities);
+        assertEquals(entities, result);
+    }
+
+    @Test
+    void testFindBySrcPayrollId() {
+        String srcId = "SRC123";
+        PayrollEntity entity = new PayrollEntity();
+        when(payrollRepository.findBySrcPayrollId(srcId)).thenReturn(Optional.of(entity));
+
+        Optional<PayrollEntity> result = service.findBySrcPayrollId(srcId);
+        assertTrue(result.isPresent());
+        assertEquals(entity, result.get());
+    }
+
+    // === Helper method for static singleton workaround ===
+    private void setMapperInstance(PayrollAuditEntity auditEntity, PayrollEntity input) {
+        try {
+            var mapperField = PayrollAuditMapper.class.getDeclaredField("INSTANCE");
+            mapperField.setAccessible(true);
+            PayrollAuditMapper mockMapper = mock(PayrollAuditMapper.class);
+            when(mockMapper.toAuditEntity(input)).thenReturn(auditEntity);
+            mapperField.set(null, mockMapper);
+        } catch (Exception e) {
+            throw new RuntimeException("Unable to mock PayrollAuditMapper.INSTANCE", e);
+        }
+    }
+}
