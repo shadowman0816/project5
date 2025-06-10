@@ -1,0 +1,117 @@
+package net.jpmchase.payroll.processor.steps.payee;
+
+import net.jpmchase.payroll.processor.entity.PayeeAccountAuditEntity;
+import net.jpmchase.payroll.processor.entity.PayeeAccountEntity;
+import net.jpmchase.payroll.processor.enums.PayeeStatus;
+import net.jpmchase.payroll.processor.exception.ProcessorException;
+import net.jpmchase.payroll.processor.model.PaymentConfiguration;
+import net.jpmchase.payroll.processor.model.Split;
+import net.jpmchase.payroll.processor.persistence.PayeeAccountAuditRepository;
+import net.jpmchase.payroll.processor.persistence.PayeeAccountRepository;
+import net.jpmchase.payroll.processor.steps.Step;
+import net.jpmchase.payroll.processor.util.WorkflowContext;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.sql.Timestamp;
+import java.time.Instant;
+import java.util.*;
+
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
+
+public class PayeeAccountStatusDeactivatorStepTest {
+
+    private PayeeAccountRepository payeeAccountRepository;
+    private PayeeAccountAuditRepository payeeAccountAuditRepository;
+    private PayeeAccountStatusDeactivatorStep step;
+
+    @BeforeEach
+    public void setup() {
+        payeeAccountRepository = mock(PayeeAccountRepository.class);
+        payeeAccountAuditRepository = mock(PayeeAccountAuditRepository.class);
+
+        step = new PayeeAccountStatusDeactivatorStep(payeeAccountRepository, payeeAccountAuditRepository);
+    }
+
+    @Test
+    public void testExecute_successfulDeactivation() {
+        WorkflowContext context = mock(WorkflowContext.class);
+        String bankAccountUUID = "bank-123";
+        String payeeId = "payee-123";
+        String messageId = "msg-456";
+
+        Split split = new Split();
+        split.setBankAccountUuid(bankAccountUUID);
+        List<Split> splits = List.of(split);
+
+        PaymentConfiguration config = mock(PaymentConfiguration.class);
+        when(config.getSplits()).thenReturn(splits);
+
+        when(context.get(eq("GXPAY.PAYEE_PAYMENT_CONFIGURATION"), eq(PaymentConfiguration.class))).thenReturn(config);
+        when(context.get(eq("BANK_ACCOUNT_UUID"), eq(String.class))).thenReturn(bankAccountUUID);
+        when(context.get(eq("PAYEE_ID"), eq(String.class))).thenReturn(payeeId);
+        when(context.get(eq("MESSAGE_ID"), eq(String.class))).thenReturn(messageId);
+
+        PayeeAccountEntity accountEntity = new PayeeAccountEntity();
+        accountEntity.setPayeeAcctId("acct-789");
+
+        when(payeeAccountRepository.findBySourceBankId(bankAccountUUID))
+                .thenReturn(Optional.of(accountEntity));
+
+        // Act
+        step.execute(context);
+
+        // Assert
+        verify(payeeAccountRepository).updateStatusBySrcBnkId(
+                eq(bankAccountUUID), eq(PayeeStatus.PENDING_CHANGE.getCode()),
+                eq("SYSTEM_USER"), any(Timestamp.class)
+        );
+        verify(payeeAccountAuditRepository).save(any(PayeeAccountAuditEntity.class));
+    }
+
+    @Test
+    public void testExecute_bankAccountMissing_shouldThrow() {
+        WorkflowContext context = mock(WorkflowContext.class);
+        String bankAccountUUID = "missing-bank-uuid";
+
+        PaymentConfiguration config = mock(PaymentConfiguration.class);
+        when(config.getSplits()).thenReturn(List.of());
+
+        when(context.get(eq("GXPAY.PAYEE_PAYMENT_CONFIGURATION"), eq(PaymentConfiguration.class))).thenReturn(config);
+        when(context.get(eq("BANK_ACCOUNT_UUID"), eq(String.class))).thenReturn(bankAccountUUID);
+
+        // Act & Assert
+        ProcessorException ex = assertThrows(ProcessorException.class, () -> step.execute(context));
+        assertTrue(ex.getMessage().contains("BANK_ACCOUNT_NOT_FOUND"));
+    }
+
+    @Test
+    public void testExecute_bankAccountExistsInGusto_shouldThrow() {
+        WorkflowContext context = mock(WorkflowContext.class);
+        String bankAccountUUID = "duplicate-uuid";
+        String messageId = "msg-999";
+        String payeeId = "payee-999";
+
+        Split split = new Split();
+        split.setBankAccountUuid(bankAccountUUID);
+        List<Split> splits = List.of(split, new Split());
+
+        PaymentConfiguration config = mock(PaymentConfiguration.class);
+        when(config.getSplits()).thenReturn(splits);
+
+        when(context.get(eq("GXPAY.PAYEE_PAYMENT_CONFIGURATION"), eq(PaymentConfiguration.class))).thenReturn(config);
+        when(context.get(eq("BANK_ACCOUNT_UUID"), eq(String.class))).thenReturn(bankAccountUUID);
+        when(context.get(eq("MESSAGE_ID"), eq(String.class))).thenReturn(messageId);
+        when(context.get(eq("PAYEE_ID"), eq(String.class))).thenReturn(payeeId);
+
+        // simulate UUID match in splits (as if still in Gusto)
+        Split s1 = new Split();
+        s1.setBankAccountUuid(bankAccountUUID);
+        when(config.getSplits()).thenReturn(List.of(s1));
+
+        // Act & Assert
+        ProcessorException ex = assertThrows(ProcessorException.class, () -> step.execute(context));
+        assertTrue(ex.getMessage().contains("BANK_ACCOUNT_EXISTS_IN_VENDOR_BUT_DEL_EVT_RECEIVED"));
+    }
+}
