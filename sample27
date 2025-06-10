@@ -224,3 +224,133 @@ class GustoPayrollRetrievalStepTest {
         assertTrue(ex.getMessage().contains("INVALID_PAYROLL_CALCULATION_DATE"));
     }
 }
+package net.jpmchase.payroll.processor.steps.payroll;
+
+import net.jpmchase.payroll.processor.entity.EnrollmentEntity;
+import net.jpmchase.payroll.processor.entity.PayrollEntity;
+import net.jpmchase.payroll.processor.enums.ProcessorExceptionType;
+import net.jpmchase.payroll.processor.exception.ProcessorException;
+import net.jpmchase.payroll.processor.model.GetPayrollResponse;
+import net.jpmchase.payroll.processor.model.ProfileLimit;
+import net.jpmchase.payroll.processor.model.EligibilityResponse;
+import net.jpmchase.payroll.processor.persistence.PayrollLimitRepository;
+import net.jpmchase.payroll.processor.persistence.ContractorPaymentGroupRepository;
+import net.jpmchase.payroll.processor.service.CustomerConfigurationService;
+import net.jpmchase.payroll.processor.util.WorkflowContext;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.math.BigDecimal;
+
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
+
+class CustomerInternalEligibilityValidationStepTest {
+
+    private PayrollLimitRepository payrollLimitRepository;
+    private ContractorPaymentGroupRepository contractorPaymentGroupRepository;
+    private CustomerConfigurationService customerConfigurationService;
+    private CustomerInternalEligibilityValidationStep step;
+
+    @BeforeEach
+    void setUp() {
+        payrollLimitRepository = mock(PayrollLimitRepository.class);
+        contractorPaymentGroupRepository = mock(ContractorPaymentGroupRepository.class);
+        customerConfigurationService = mock(CustomerConfigurationService.class);
+        step = new CustomerInternalEligibilityValidationStep(payrollLimitRepository, contractorPaymentGroupRepository, customerConfigurationService);
+    }
+
+    @Test
+    void testExecute_validationPasses() {
+        WorkflowContext context = mock(WorkflowContext.class);
+        String companyId = "company123";
+        String profileId = "profile123";
+        String payrollId = "payroll789";
+
+        EnrollmentEntity enrollment = new EnrollmentEntity();
+        GetPayrollResponse payrollResponse = mock(GetPayrollResponse.class);
+        PayrollEntity payrollEntity = new PayrollEntity();
+
+        when(context.get("COMPANY_UUID", String.class)).thenReturn(companyId);
+        when(context.get("COMPANY_ENROLLMENT", EnrollmentEntity.class)).thenReturn(enrollment);
+        when(context.get("GUSTO_SINGLE_PAYROLL", GetPayrollResponse.class)).thenReturn(payrollResponse);
+        when(context.get("PAYROLL_ENTITY", PayrollEntity.class)).thenReturn(payrollEntity);
+        when(context.get("PROFILE_UUID", String.class)).thenReturn(profileId);
+        when(context.get("PAYROLL_UUID", String.class)).thenReturn(payrollId);
+        when(payrollResponse.getCompanyDebit()).thenReturn("100.00");
+
+        ProfileLimit profileLimit = new ProfileLimit();
+        profileLimit.setLimitAmount(new BigDecimal("500.00"));
+
+        EligibilityResponse eligibilityResponse = new EligibilityResponse();
+        eligibilityResponse.setEnterprisePartyIdentifier("actor-001");
+
+        when(customerConfigurationService.validateEligibilityAndAccount(companyId, profileId)).thenReturn(profileLimit);
+        when(customerConfigurationService.getEligibilityInfo(companyId, profileId)).thenReturn(eligibilityResponse);
+
+        // Act
+        step.execute(context);
+
+        // Assert
+        verify(context).put(eq("ACTOR_ENTP_PRTY_ID"), eq("actor-001"));
+        verify(context).put(eq("LIMIT_AMT"), eq(new BigDecimal("500.00")));
+        verify(context).put(eq("LIMIT_TYPE"), any());
+        verify(context).put(eq("SEG_TYPE"), any());
+    }
+
+    @Test
+    void testExecute_cancelFlagTrue_shouldSkip() {
+        WorkflowContext context = mock(WorkflowContext.class);
+        when(context.get("CANCEL_GUSTO_PAYROLL", Boolean.class)).thenReturn(true);
+
+        // Should skip without exception
+        assertDoesNotThrow(() -> step.execute(context));
+    }
+
+    @Test
+    void testExecute_invalidProfile_shouldThrow() {
+        WorkflowContext context = mock(WorkflowContext.class);
+
+        when(context.get("CANCEL_GUSTO_PAYROLL", Boolean.class)).thenReturn(false);
+        when(context.get("COMPANY_UUID", String.class)).thenReturn("company");
+        when(context.get("PROFILE_UUID", String.class)).thenReturn(null); // Simulate missing profile
+        when(context.get("PAYROLL_UUID", String.class)).thenReturn("payroll");
+        when(context.get("COMPANY_ENROLLMENT", EnrollmentEntity.class)).thenReturn(new EnrollmentEntity());
+        when(context.get("GUSTO_SINGLE_PAYROLL", GetPayrollResponse.class)).thenReturn(mock(GetPayrollResponse.class));
+        when(context.get("PAYROLL_ENTITY", PayrollEntity.class)).thenReturn(mock(PayrollEntity.class));
+
+        ProcessorException ex = assertThrows(ProcessorException.class, () -> step.execute(context));
+        assertEquals(ProcessorExceptionType.BUSINESS_VALIDATION, ex.getType());
+        assertTrue(ex.getMessage().contains("INVALID_PROFILE_ID"));
+    }
+
+    @Test
+    void testExecute_limitExceeded_shouldThrow() {
+        WorkflowContext context = mock(WorkflowContext.class);
+        String companyId = "company";
+        String profileId = "profile";
+        String payrollId = "payroll";
+
+        EnrollmentEntity enrollment = new EnrollmentEntity();
+        GetPayrollResponse payrollResponse = mock(GetPayrollResponse.class);
+        PayrollEntity payrollEntity = new PayrollEntity();
+
+        when(context.get("CANCEL_GUSTO_PAYROLL", Boolean.class)).thenReturn(false);
+        when(context.get("COMPANY_UUID", String.class)).thenReturn(companyId);
+        when(context.get("COMPANY_ENROLLMENT", EnrollmentEntity.class)).thenReturn(enrollment);
+        when(context.get("GUSTO_SINGLE_PAYROLL", GetPayrollResponse.class)).thenReturn(payrollResponse);
+        when(context.get("PAYROLL_ENTITY", PayrollEntity.class)).thenReturn(payrollEntity);
+        when(context.get("PROFILE_UUID", String.class)).thenReturn(profileId);
+        when(context.get("PAYROLL_UUID", String.class)).thenReturn(payrollId);
+        when(payrollResponse.getCompanyDebit()).thenReturn("1000.00"); // Exceeds limit
+
+        ProfileLimit profileLimit = new ProfileLimit();
+        profileLimit.setLimitAmount(new BigDecimal("500.00"));
+
+        when(customerConfigurationService.validateEligibilityAndAccount(companyId, profileId)).thenReturn(profileLimit);
+
+        ProcessorException ex = assertThrows(ProcessorException.class, () -> step.execute(context));
+        assertEquals(ProcessorExceptionType.BUSINESS_VALIDATION, ex.getType());
+        assertTrue(ex.getMessage().contains("DAILY_LIMIT_EXCEEDED"));
+    }
+}
