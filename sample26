@@ -438,3 +438,89 @@ class PayrollTransactionPersistenceServiceTest {
         }
     }
 }
+import net.jpmchase.payroll.processor.service.CustomerConfigurationService;
+import net.jpmchase.payroll.processor.config.PayrollOptionsConfiguration;
+import net.jpmchase.payroll.processor.model.entity.EnrollmentEntity;
+import net.jpmchase.payroll.processor.model.response.PaymentCustomerEligibilityResponse;
+import net.jpmchase.payroll.processor.service.external.LimitUtilityService;
+import net.jpmchase.payroll.processor.service.external.ProfileEligibilityService;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.math.BigDecimal;
+import java.util.Optional;
+
+import static org.mockito.Mockito.*;
+import static org.junit.jupiter.api.Assertions.*;
+
+class CustomerConfigurationServiceTest {
+
+    private ProfileEligibilityService profileEligibilityService;
+    private LimitUtilityService limitUtilityService;
+    private PayrollOptionsConfiguration payrollOptionsConfiguration;
+    private CustomerConfigurationService service;
+
+    @BeforeEach
+    void setup() {
+        profileEligibilityService = mock(ProfileEligibilityService.class);
+        limitUtilityService = mock(LimitUtilityService.class);
+        payrollOptionsConfiguration = mock(PayrollOptionsConfiguration.class);
+        service = new CustomerConfigurationService(profileEligibilityService, limitUtilityService, payrollOptionsConfiguration);
+    }
+
+    @Test
+    void testValidatePartyAndAccount() {
+        EnrollmentEntity enrollmentEntity = new EnrollmentEntity();
+        enrollmentEntity.setEntProfileId(101L);
+        enrollmentEntity.setGetEntPartyId(202L);
+        String companyId = "COMP123";
+
+        PaymentCustomerEligibilityResponse response = new PaymentCustomerEligibilityResponse();
+
+        when(profileEligibilityService.checkProductEligibility(101L, companyId)).thenReturn(response);
+        doNothing().when(profileEligibilityService).validateProductAndAccountEligibility(202L, 101L, response);
+
+        PaymentCustomerEligibilityResponse result = service.validatePartyAndAccount(enrollmentEntity, companyId, 101L);
+
+        assertNotNull(result);
+        assertEquals(response, result);
+        verify(profileEligibilityService).checkProductEligibility(101L, companyId);
+        verify(profileEligibilityService).validateProductAndAccountEligibility(202L, 101L, response);
+    }
+
+    @Test
+    void testGetProfileLimit() {
+        long profileId = 101L, personId = 1001L, segmentId = 2001L;
+        String segment = "SMALL", product = "PAYROLL";
+
+        BigDecimal expectedLimit = new BigDecimal("5000.00");
+
+        when(limitUtilityService.getSegmentProfileLimit(profileId, personId, segmentId, product)).thenReturn(expectedLimit);
+
+        BigDecimal result = service.getProfileLimit(profileId, personId, segmentId, segment, product);
+
+        assertEquals(expectedLimit, result);
+        verify(limitUtilityService).getSegmentProfileLimit(profileId, personId, segmentId, product);
+    }
+
+    @Test
+    void testGetDailyLimitWhenPresent() {
+        BigDecimal expectedLimit = new BigDecimal("7500.00");
+        when(payrollOptionsConfiguration.getPayrollDailyLimit()).thenReturn(Optional.of(expectedLimit));
+
+        BigDecimal result = service.getDailyLimit();
+
+        assertEquals(expectedLimit, result);
+        verify(payrollOptionsConfiguration).getPayrollDailyLimit();
+    }
+
+    @Test
+    void testGetDailyLimitWhenAbsent() {
+        when(payrollOptionsConfiguration.getPayrollDailyLimit()).thenReturn(Optional.empty());
+
+        BigDecimal result = service.getDailyLimit();
+
+        assertEquals(BigDecimal.ZERO, result);
+        verify(payrollOptionsConfiguration).getPayrollDailyLimit();
+    }
+}
