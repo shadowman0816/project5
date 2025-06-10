@@ -524,3 +524,74 @@ class CustomerConfigurationServiceTest {
         verify(payrollOptionsConfiguration).getPayrollDailyLimit();
     }
 }
+package net.jpmchase.payroll.processor.service;
+
+import net.jpmchase.payroll.processor.entity.*;
+import net.jpmchase.payroll.processor.enums.EntryEntityType;
+import net.jpmchase.payroll.processor.mapper.EmployeeTransactionMapper;
+import net.jpmchase.payroll.processor.mapper.PayrollTransactionEntityMapper;
+import net.jpmchase.payroll.processor.model.GetPayrollResponse;
+import net.jpmchase.payroll.processor.persistence.*;
+import net.jpmchase.payroll.processor.workflow.WorkflowContext;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.util.*;
+
+import static org.mockito.Mockito.*;
+import static org.junit.jupiter.api.Assertions.*;
+
+public class StorePayrollServiceTest {
+
+    private PayrollPersistenceService payrollPersistenceService;
+    private PayrollTransactionPersistenceService payrollTransactionPersistenceService;
+    private EmployeeTransactionPersistenceService employeeTransactionPersistenceService;
+    private StorePayrollService storePayrollService;
+
+    @BeforeEach
+    public void setUp() {
+        payrollPersistenceService = mock(PayrollPersistenceService.class);
+        payrollTransactionPersistenceService = mock(PayrollTransactionPersistenceService.class);
+        employeeTransactionPersistenceService = mock(EmployeeTransactionPersistenceService.class);
+
+        storePayrollService = new StorePayrollService(
+                payrollPersistenceService,
+                payrollTransactionPersistenceService,
+                employeeTransactionPersistenceService,
+                new PayrollOptionsConfiguration() // use real or mocked depending on internal behavior
+        );
+    }
+
+    @Test
+    public void testPersist_shouldSaveTransactionsCorrectly() {
+        // Arrange
+        GetPayrollResponse payrollResponse = mock(GetPayrollResponse.class);
+        WorkflowContext context = mock(WorkflowContext.class);
+        String srcEventId = "srcEvent123";
+        String actorEmpEntPtyId = "actor123";
+        String bankAccountPtyEntId = "bank123";
+
+        PayrollEntity existingPayroll = new PayrollEntity();
+        existingPayroll.setPayrollUuid(UUID.randomUUID());
+
+        when(payrollPersistenceService.findBySrcPayrollIdOrError(srcEventId, EntryEntityType.PAYROLL_RECORD))
+                .thenReturn(existingPayroll);
+
+        List<PayrollTransactionEntity> mockPayrollTxns = Collections.singletonList(new PayrollTransactionEntity());
+        List<EmployeeTransactionEntity> mockEmployeeTxns = Collections.singletonList(new EmployeeTransactionEntity());
+
+        // Simulate static mapper methods
+        PayrollTransactionEntityMapper mapper = PayrollTransactionEntityMapper.INSTANCE;
+        EmployeeTransactionMapper empMapper = EmployeeTransactionMapper.INSTANCE;
+
+        List<EmployeePaymentConfiguration> paymentConfigs = new ArrayList<>();
+        when(context.get(eq("GXPAYROLL_EMP_CONFIGURATIONS"), eq(List.class))).thenReturn(paymentConfigs);
+
+        // Act
+        storePayrollService.persist(payrollResponse, context, srcEventId, actorEmpEntPtyId, bankAccountPtyEntId);
+
+        // Assert
+        verify(payrollTransactionPersistenceService).saveAllWithAudit(anyList());
+        verify(employeeTransactionPersistenceService).saveAllWithAudit(anyList());
+    }
+}
