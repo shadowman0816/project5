@@ -115,3 +115,112 @@ public class PayeeAccountStatusDeactivatorStepTest {
         assertTrue(ex.getMessage().contains("BANK_ACCOUNT_EXISTS_IN_VENDOR_BUT_DEL_EVT_RECEIVED"));
     }
 }
+package net.jpmchase.payroll.processor.steps.payroll;
+
+import net.jpmchase.payroll.processor.entity.EnrollmentEntity;
+import net.jpmchase.payroll.processor.entity.PayrollEntity;
+import net.jpmchase.payroll.processor.exception.ProcessorException;
+import net.jpmchase.payroll.processor.exception.ProcessorExceptionType;
+import net.jpmchase.payroll.processor.model.GetPayrollResponse;
+import net.jpmchase.payroll.processor.service.PayrollService;
+import net.jpmchase.payroll.processor.steps.Step;
+import net.jpmchase.payroll.processor.util.WorkflowContext;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.time.Instant;
+import java.time.ZonedDateTime;
+import java.util.UUID;
+
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
+
+class GustoPayrollRetrievalStepTest {
+
+    private PayrollService payrollService;
+    private GustoPayrollRetrievalStep step;
+
+    @BeforeEach
+    void setUp() {
+        payrollService = mock(PayrollService.class);
+        step = new GustoPayrollRetrievalStep(payrollService);
+    }
+
+    @Test
+    void testExecute_successfulProcessing() {
+        WorkflowContext context = mock(WorkflowContext.class);
+        String payrollUuid = UUID.randomUUID().toString();
+        String companyId = "company-123";
+        EnrollmentEntity enrollmentEntity = new EnrollmentEntity();
+
+        PayrollEntity payrollEntity = new PayrollEntity();
+        payrollEntity.setCalculatedDate(Instant.parse("2025-06-10T00:00:00Z"));
+
+        GetPayrollResponse payrollResponse = mock(GetPayrollResponse.class);
+        when(payrollResponse.isProcessed()).thenReturn(true);
+        when(payrollResponse.getCalculatedAt()).thenReturn("2025-06-10T00:00:00Z");
+
+        when(context.get("PAYROLL_UUID", String.class)).thenReturn(payrollUuid);
+        when(context.get("COMPANY_UUID", String.class)).thenReturn(companyId);
+        when(context.get("COMPANY_ENROLLMENT", EnrollmentEntity.class)).thenReturn(enrollmentEntity);
+        when(context.get("PAYROLL_ENTITY", PayrollEntity.class)).thenReturn(payrollEntity);
+        when(payrollService.getSinglePayrollEnrollmentEntity(enrollmentEntity.getEntPtyId(), companyId, payrollUuid))
+                .thenReturn(payrollResponse);
+
+        // Act
+        step.execute(context);
+
+        // Assert
+        verify(context).put(eq("GUSTO_SINGLE_PAYROLL"), eq(payrollResponse));
+    }
+
+    @Test
+    void testExecute_invalidStatus_shouldThrow() {
+        WorkflowContext context = mock(WorkflowContext.class);
+        String payrollUuid = "payroll-456";
+        String companyId = "company-456";
+        EnrollmentEntity enrollmentEntity = new EnrollmentEntity();
+
+        GetPayrollResponse payrollResponse = mock(GetPayrollResponse.class);
+        when(payrollResponse.isProcessed()).thenReturn(false);
+
+        when(context.get("PAYROLL_UUID", String.class)).thenReturn(payrollUuid);
+        when(context.get("COMPANY_UUID", String.class)).thenReturn(companyId);
+        when(context.get("COMPANY_ENROLLMENT", EnrollmentEntity.class)).thenReturn(enrollmentEntity);
+
+        when(payrollService.getSinglePayrollEnrollmentEntity(enrollmentEntity.getEntPtyId(), companyId, payrollUuid))
+                .thenReturn(payrollResponse);
+
+        ProcessorException ex = assertThrows(ProcessorException.class, () -> step.execute(context));
+        assertEquals(ProcessorExceptionType.BUSINESS_VALIDATION, ex.getType());
+        assertTrue(ex.getMessage().contains("INVALID_PAYROLL_STATUS"));
+    }
+
+    @Test
+    void testExecute_dateMismatch_shouldThrow() {
+        WorkflowContext context = mock(WorkflowContext.class);
+        String payrollUuid = UUID.randomUUID().toString();
+        String companyId = "company-date-mismatch";
+
+        EnrollmentEntity enrollmentEntity = new EnrollmentEntity();
+
+        PayrollEntity payrollEntity = new PayrollEntity();
+        payrollEntity.setCalculatedDate(Instant.parse("2025-06-09T00:00:00Z")); // Mismatch here
+
+        GetPayrollResponse payrollResponse = mock(GetPayrollResponse.class);
+        when(payrollResponse.isProcessed()).thenReturn(true);
+        when(payrollResponse.getCalculatedAt()).thenReturn("2025-06-10T00:00:00Z"); // Gusto calculated date
+
+        when(context.get("PAYROLL_UUID", String.class)).thenReturn(payrollUuid);
+        when(context.get("COMPANY_UUID", String.class)).thenReturn(companyId);
+        when(context.get("COMPANY_ENROLLMENT", EnrollmentEntity.class)).thenReturn(enrollmentEntity);
+        when(context.get("PAYROLL_ENTITY", PayrollEntity.class)).thenReturn(payrollEntity);
+
+        when(payrollService.getSinglePayrollEnrollmentEntity(enrollmentEntity.getEntPtyId(), companyId, payrollUuid))
+                .thenReturn(payrollResponse);
+
+        ProcessorException ex = assertThrows(ProcessorException.class, () -> step.execute(context));
+        assertEquals(ProcessorExceptionType.BUSINESS_VALIDATION, ex.getType());
+        assertTrue(ex.getMessage().contains("INVALID_PAYROLL_CALCULATION_DATE"));
+    }
+}
