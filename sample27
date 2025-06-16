@@ -416,5 +416,5 @@ That said, mocking the local time entirely just to avoid edge scenarios might be
 Happy to discuss further if you feel there’s a real risk in a specific CI/CD scenario, but as it stands, the test behaves predictably.
 
 Just to share some context — the use of local time here actually helped us identify a real issue that occurred last Friday due to a weekend-related cutoff failure. If we had mocked the time in tests, we likely would have missed that edge case entirely.
-
+Happy to have a broader discussion on this as needed, but for now, I don’t think this warrants further delay. Could we please move forward and proceed with the deployment to QA?
 So while I understand the concern around reliability, in this case, letting the test run with actual local time surfaced a genuine production scenario, which I’d argue is valuable. The condition is deterministic, and unless we’re running tests precisely at 23:59, it shouldn’t introduce flakiness.
