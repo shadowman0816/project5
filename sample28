@@ -84,3 +84,123 @@ public class WorkflowContext {
         contextData.put(key, clonedList);
     }
 }
+package net.jpmchase.payroll.processor.common.context;
+
+import net.jpmchase.payroll.processor.remote.gusto.model.payment.EmployeePaymentConfiguration;
+import net.jpmchase.payroll.processor.remote.gusto.model.payment.Split;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.time.Duration;
+import java.time.LocalTime;
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+class WorkflowContextTest {
+
+    private WorkflowContext context;
+
+    @BeforeEach
+    void setUp() {
+        context = new WorkflowContext();
+    }
+
+    @Test
+    void testPutAndGet() {
+        context.put("STRING_KEY", "hello");
+        assertEquals("hello", context.get("STRING_KEY"));
+
+        context.put("INT_KEY", 42);
+        assertEquals(42, context.get("INT_KEY", Integer.class));
+    }
+
+    @Test
+    void testContainsKey() {
+        context.put("KEY_EXISTS", "val");
+        assertTrue(context.containsKey("KEY_EXISTS"));
+        assertFalse(context.containsKey("KEY_MISSING"));
+    }
+
+    @Test
+    void testRemove() {
+        context.put("TEMP_KEY", "toRemove");
+        String removed = context.remove("TEMP_KEY", String.class);
+        assertEquals("toRemove", removed);
+        assertFalse(context.containsKey("TEMP_KEY"));
+    }
+
+    @Test
+    void testIsWithinBackoffPeriod_True() {
+        LocalTime now = LocalTime.of(9, 0);
+        LocalTime cutoff = LocalTime.of(10, 0);
+        Duration backoff = Duration.ofMinutes(45);
+
+        assertTrue(context.isWithinBackoffPeriod(backoff, cutoff, now));
+    }
+
+    @Test
+    void testIsWithinBackoffPeriod_False() {
+        LocalTime now = LocalTime.of(7, 0);
+        LocalTime cutoff = LocalTime.of(10, 0);
+        Duration backoff = Duration.ofHours(1);
+
+        assertFalse(context.isWithinBackoffPeriod(backoff, cutoff, now));
+    }
+
+    @Test
+    void testPutDeepCloneAndGetDeepClone() {
+        EmployeePaymentConfiguration original = buildSampleConfig("emp-001");
+
+        context.putDeepClone("CONFIG_KEY", original, EmployeePaymentConfiguration.class);
+        EmployeePaymentConfiguration result = context.getDeepClone("CONFIG_KEY", EmployeePaymentConfiguration.class);
+
+        assertNotNull(result);
+        assertEquals("emp-001", result.getEmployeeId());
+        assertNotSame(original, result);
+        assertEquals(2, result.getSplits().size());
+    }
+
+    @Test
+    void testPutAndGetDeepClonedList() {
+        EmployeePaymentConfiguration e1 = buildSampleConfig("emp-001");
+        EmployeePaymentConfiguration e2 = buildSampleConfig("emp-002");
+
+        context.putDeepClonedList("CONFIG_LIST", List.of(e1, e2), EmployeePaymentConfiguration.class);
+
+        List<EmployeePaymentConfiguration> list = context.getDeepClonedList("CONFIG_LIST", EmployeePaymentConfiguration.class);
+        assertEquals(2, list.size());
+        assertEquals("emp-002", list.get(1).getEmployeeId());
+        assertEquals(2, list.get(1).getSplits().size());
+    }
+
+    @Test
+    void testGetDeepClonedList_ThrowsIfNotList() {
+        context.put("BAD_KEY", "not a list");
+
+        assertThrows(IllegalArgumentException.class, () ->
+                context.getDeepClonedList("BAD_KEY", EmployeePaymentConfiguration.class)
+        );
+    }
+
+    // 🔨 Helper builder for EmployeePaymentConfiguration
+    private EmployeePaymentConfiguration buildSampleConfig(String empId) {
+        Split s1 = new Split();
+        s1.setBankAccountUUID("uuid1");
+        s1.setSplitAmount(500);
+        s1.setPriority(1L);
+
+        Split s2 = new Split();
+        s2.setBankAccountUUID("uuid2");
+        s2.setSplitAmount(500);
+        s2.setPriority(2L);
+
+        EmployeePaymentConfiguration config = new EmployeePaymentConfiguration();
+        config.setEmployeeId(empId);
+        config.setPaymentMethod("direct_deposit");
+        config.setSplitBy("amount");
+        config.setSplits(List.of(s1, s2));
+
+        return config;
+    }
+}
