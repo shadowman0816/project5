@@ -1,0 +1,34 @@
+private Map<String, String> getBankAccountToPayeeAccountMap(
+        List<EmployeePaymentConfiguration> paymentConfigurations) {
+
+    Map<String, String> bankAccountToPayeeAccountMap = new HashMap<>();
+
+    for (EmployeePaymentConfiguration config : paymentConfigurations) {
+        String employeeId = config.getEmployeeId();
+        if (employeeId == null || employeeId.isBlank()) {
+            log.warn("[PAYEE_MAPPING] Skipping config with null/blank employeeId");
+            continue;
+        }
+
+        Optional<List<PayeeAccountEntity>> payeeAccountsOpt =
+                payeeAccountRepository.findBySourcePayeeId(employeeId);
+
+        if (payeeAccountsOpt.isEmpty()) {
+            log.warn("[PAYEE_MAPPING] No payee accounts found for employeeId={}", employeeId);
+            continue;
+        }
+
+        for (PayeeAccountEntity account : payeeAccountsOpt.get()) {
+            String srcBankId = account.getSrcBnkId();
+            String payeeAccountId = account.getPyrlPayeeAcctId();
+
+            if (srcBankId != null && payeeAccountId != null) {
+                bankAccountToPayeeAccountMap.put(srcBankId, payeeAccountId);
+            } else {
+                log.warn("[PAYEE_MAPPING] Incomplete PayeeAccountEntity for employeeId={}", employeeId);
+            }
+        }
+    }
+
+    return bankAccountToPayeeAccountMap;
+}
