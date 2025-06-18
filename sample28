@@ -204,3 +204,29 @@ class WorkflowContextTest {
         return config;
     }
 }
+public List<EmployeePaymentConfiguration> validateAndReloadPaymentConfigurationsIfSplitsMissing(
+        List<EmployeePaymentConfiguration> currentConfigs,
+        PaymentConfigurationService paymentConfigurationService,
+        EnrollmentEntity enrollmentEntity,
+        String companyId,
+        String payrollId) {
+
+    boolean hasMissingSplits = currentConfigs.stream().anyMatch(cfg ->
+        "direct_deposit".equalsIgnoreCase(cfg.getPaymentMethod())
+            && (cfg.getSplits() == null || cfg.getSplits().isEmpty())
+    );
+
+    if (!hasMissingSplits) {
+        return currentConfigs;
+    }
+
+    log.warn("[PAYMENT_CONFIG] Some configurations had missing splits for direct deposit. Reloading from Gusto...");
+
+    // Reload using the same method as in ReconcileEmployeePaymentInformationStep
+    return paymentConfigurationService.getAllEmpPaymentConfigurationsForAPayroll(
+            enrollmentEntity.getEntPrptyId(),
+            UUID.fromString(companyId),
+            UUID.fromString(payrollId)
+    );
+}
+
