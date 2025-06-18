@@ -229,4 +229,138 @@ public List<EmployeePaymentConfiguration> validateAndReloadPaymentConfigurations
             UUID.fromString(payrollId)
     );
 }
+package net.jpmchase.payroll.processor.service;
 
+import net.jpmchase.payroll.processor.remote.gusto.model.payment.EmployeePaymentConfiguration;
+import net.jpmchase.payroll.processor.remote.gusto.model.payment.Split;
+import net.jpmchase.payroll.processor.repository.mgmt.entity.EnrollmentEntity;
+import net.jpmchase.payroll.processor.service.config.PaymentConfigurationService;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.util.List;
+import java.util.UUID;
+
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
+
+class StorePayrollServiceTest {
+
+    private StorePayrollService storePayrollService;
+    private PaymentConfigurationService mockConfigService;
+
+    private final EnrollmentEntity enrollmentEntity = new EnrollmentEntity();
+    private final String companyId = UUID.randomUUID().toString();
+    private final String payrollId = UUID.randomUUID().toString();
+
+    @BeforeEach
+    void setup() {
+        mockConfigService = mock(PaymentConfigurationService.class);
+        storePayrollService = new StorePayrollService(null, null, null, mockConfigService);
+        enrollmentEntity.setEntPrptyId("ent-123");
+    }
+
+    @Test
+    void testReturnsOriginalListWhenSplitsArePresent() {
+        EmployeePaymentConfiguration config = new EmployeePaymentConfiguration();
+        config.setEmployeeId("emp1");
+        config.setPaymentMethod("direct_deposit");
+        config.setSplits(List.of(new Split()));
+
+        List<EmployeePaymentConfiguration> input = List.of(config);
+
+        List<EmployeePaymentConfiguration> result =
+            storePayrollService.validateAndReloadPaymentConfigurationsIfSplitsMissing(
+                input, enrollmentEntity, companyId, payrollId
+            );
+
+        assertSame(input, result);
+        verifyNoInteractions(mockConfigService);
+    }
+
+    @Test
+    void testReturnsOriginalListWhenPaymentMethodIsNotDirectDeposit() {
+        EmployeePaymentConfiguration config = new EmployeePaymentConfiguration();
+        config.setEmployeeId("emp2");
+        config.setPaymentMethod("check");
+        config.setSplits(null); // invalid but not for check
+
+        List<EmployeePaymentConfiguration> input = List.of(config);
+
+        List<EmployeePaymentConfiguration> result =
+            storePayrollService.validateAndReloadPaymentConfigurationsIfSplitsMissing(
+                input, enrollmentEntity, companyId, payrollId
+            );
+
+        assertSame(input, result);
+        verifyNoInteractions(mockConfigService);
+    }
+
+    @Test
+    void testReloadsFromGustoIfSplitsAreMissingForDirectDeposit() {
+        EmployeePaymentConfiguration broken = new EmployeePaymentConfiguration();
+        broken.setEmployeeId("emp3");
+        broken.setPaymentMethod("direct_deposit");
+        broken.setSplits(null); // missing splits
+
+        List<EmployeePaymentConfiguration> reloaded = List.of(createValidConfig("emp4"));
+
+        when(mockConfigService.getAllEmpPaymentConfigurationsForAPayroll(
+            eq("ent-123"), eq(UUID.fromString(companyId)), eq(UUID.fromString(payrollId))))
+            .thenReturn(reloaded);
+
+        List<EmployeePaymentConfiguration> result =
+            storePayrollService.validateAndReloadPaymentConfigurationsIfSplitsMissing(
+                List.of(broken), enrollmentEntity, companyId, payrollId
+            );
+
+        assertEquals(reloaded, result);
+        verify(mockConfigService).getAllEmpPaymentConfigurationsForAPayroll(
+            eq("ent-123"), eq(UUID.fromString(companyId)), eq(UUID.fromString(payrollId)));
+    }
+
+    @Test
+    void testReloadsIfSplitsAreEmptyList() {
+        EmployeePaymentConfiguration broken = new EmployeePaymentConfiguration();
+        broken.setEmployeeId("emp5");
+        broken.setPaymentMethod("direct_deposit");
+        broken.setSplits(List.of()); // empty
+
+        List<EmployeePaymentConfiguration> reloaded = List.of(createValidConfig("emp6"));
+
+        when(mockConfigService.getAllEmpPaymentConfigurationsForAPayroll(
+            any(), any(), any())).thenReturn(reloaded);
+
+        List<EmployeePaymentConfiguration> result =
+            storePayrollService.validateAndReloadPaymentConfigurationsIfSplitsMissing(
+                List.of(broken), enrollmentEntity, companyId, payrollId
+            );
+
+        assertEquals("emp6", result.get(0).getEmployeeId());
+    }
+
+    @Test
+    void testReturnsOriginalIfListIsEmpty() {
+        List<EmployeePaymentConfiguration> result =
+            storePayrollService.validateAndReloadPaymentConfigurationsIfSplitsMissing(
+                List.of(), enrollmentEntity, companyId, payrollId
+            );
+
+        assertTrue(result.isEmpty());
+        verifyNoInteractions(mockConfigService);
+    }
+
+    // Helper to make a valid config with splits
+    private EmployeePaymentConfiguration createValidConfig(String empId) {
+        EmployeePaymentConfiguration config = new EmployeePaymentConfiguration();
+        config.setEmployeeId(empId);
+        config.setPaymentMethod("direct_deposit");
+
+        Split split = new Split();
+        split.setSplitAmount(100);
+        split.setBankAccountUUID("uuid");
+
+        config.setSplits(List.of(split));
+        return config;
+    }
+}
