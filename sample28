@@ -1,0 +1,86 @@
+package net.jpmchase.payroll.processor.common.context;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import lombok.Getter;
+import lombok.Setter;
+
+import java.time.Duration;
+import java.time.Instant;
+import java.time.LocalTime;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+
+@Getter
+@Setter
+public class WorkflowContext {
+
+    private final Map<String, Object> contextData = new ConcurrentHashMap<>();
+    private final ObjectMapper objectMapper = new ObjectMapper();
+
+    private final Instant startTime = Instant.now();
+    private String currentStep;
+    private WorkflowContextStatus status;
+    private String entityType;
+    private String eventType;
+
+    public <T> void put(String key, T value) {
+        contextData.put(key, value);
+    }
+
+    public Object get(String key) {
+        return contextData.get(key);
+    }
+
+    public boolean containsKey(String key) {
+        return contextData.containsKey(key);
+    }
+
+    public <T> T get(String key, Class<T> clazz) {
+        return clazz.cast(contextData.get(key));
+    }
+
+    public <T> T remove(String key, Class<T> clazz) {
+        return clazz.cast(contextData.remove(key));
+    }
+
+    public boolean isWithinBackoffPeriod(Duration allowedDuration, LocalTime cutoffTime, LocalTime now) {
+        LocalTime windowStart = now.minus(allowedDuration);
+        return now.isBefore(cutoffTime) && !now.isBefore(windowStart);
+    }
+
+    // ✅ Deep clone before putting
+    public <T> void putDeepClone(String key, T value, Class<T> clazz) {
+        T clonedValue = objectMapper.convertValue(value, clazz);
+        contextData.put(key, clonedValue);
+    }
+
+    // ✅ Deep clone while getting a single object
+    public <T> T getDeepClone(String key, Class<T> clazz) {
+        Object raw = contextData.get(key);
+        return objectMapper.convertValue(raw, clazz);
+    }
+
+    // ✅ Deep clone for list of objects
+    public <T> List<T> getDeepClonedList(String key, Class<T> elementClass) {
+        Object raw = contextData.get(key);
+        if (!(raw instanceof List<?>)) {
+            throw new IllegalArgumentException("Expected a List at key: " + key);
+        }
+
+        List<?> rawList = (List<?>) raw;
+        List<T> rebuilt = new ArrayList<>();
+        for (Object item : rawList) {
+            rebuilt.add(objectMapper.convertValue(item, elementClass));
+        }
+        return rebuilt;
+    }
+
+    // ✅ Deep clone while putting a list
+    public <T> void putDeepClonedList(String key, List<T> list, Class<T> elementClass) {
+        List<T> clonedList = new ArrayList<>();
+        for (T item : list) {
+            clonedList.add(objectMapper.convertValue(item, elementClass));
+        }
+        contextData.put(key, clonedList);
+    }
+}
