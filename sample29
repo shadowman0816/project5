@@ -31,4 +31,85 @@ private Map<String, String> getBankAccountToPayeeAccountMap(
     }
 
     return bankAccountToPayeeAccountMap;
+}@Test
+void testGetBankAccountToPayeeAccountMap_shouldReturnValidMap() {
+    // given
+    EmployeePaymentConfiguration config = new EmployeePaymentConfiguration();
+    config.setEmployeeId("emp123");
+
+    List<EmployeePaymentConfiguration> configs = List.of(config);
+
+    PayeeAccountEntity account1 = new PayeeAccountEntity();
+    account1.setSrcBnkId("bank1");
+    account1.setPyrlPayeeAcctId("payee1");
+
+    PayeeAccountEntity account2 = new PayeeAccountEntity();
+    account2.setSrcBnkId("bank2");
+    account2.setPyrlPayeeAcctId("payee2");
+
+    when(payeeAccountRepository.findBySourcePayeeId("emp123"))
+        .thenReturn(Optional.of(List.of(account1, account2)));
+
+    // when
+    Method method = StorePayrollService.class.getDeclaredMethod("getBankAccountToPayeeAccountMap", List.class);
+    method.setAccessible(true);
+
+    @SuppressWarnings("unchecked")
+    Map<String, String> result = (Map<String, String>) method.invoke(storePayrollService, configs);
+
+    // then
+    assertEquals(2, result.size());
+    assertEquals("payee1", result.get("bank1"));
+    assertEquals("payee2", result.get("bank2"));
 }
+@Test
+void testGetBankAccountToPayeeAccountMap_shouldSkipNullEmployeeId() throws Exception {
+    EmployeePaymentConfiguration config = new EmployeePaymentConfiguration(); // No employeeId
+
+    Method method = StorePayrollService.class.getDeclaredMethod("getBankAccountToPayeeAccountMap", List.class);
+    method.setAccessible(true);
+
+    @SuppressWarnings("unchecked")
+    Map<String, String> result = (Map<String, String>) method.invoke(storePayrollService, List.of(config));
+
+    assertTrue(result.isEmpty());
+    verifyNoInteractions(payeeAccountRepository);
+}
+@Test
+void testGetBankAccountToPayeeAccountMap_shouldSkipIfNoPayeeAccounts() throws Exception {
+    EmployeePaymentConfiguration config = new EmployeePaymentConfiguration();
+    config.setEmployeeId("emp123");
+
+    when(payeeAccountRepository.findBySourcePayeeId("emp123"))
+        .thenReturn(Optional.empty());
+
+    Method method = StorePayrollService.class.getDeclaredMethod("getBankAccountToPayeeAccountMap", List.class);
+    method.setAccessible(true);
+
+    @SuppressWarnings("unchecked")
+    Map<String, String> result = (Map<String, String>) method.invoke(storePayrollService, List.of(config));
+
+    assertTrue(result.isEmpty());
+}
+@Test
+void testGetBankAccountToPayeeAccountMap_shouldSkipIfSrcBankOrPayeeIdNull() throws Exception {
+    EmployeePaymentConfiguration config = new EmployeePaymentConfiguration();
+    config.setEmployeeId("emp999");
+
+    PayeeAccountEntity incomplete = new PayeeAccountEntity();
+    incomplete.setSrcBnkId(null);
+    incomplete.setPyrlPayeeAcctId("payeeX"); // Incomplete
+
+    when(payeeAccountRepository.findBySourcePayeeId("emp999"))
+        .thenReturn(Optional.of(List.of(incomplete)));
+
+    Method method = StorePayrollService.class.getDeclaredMethod("getBankAccountToPayeeAccountMap", List.class);
+    method.setAccessible(true);
+
+    @SuppressWarnings("unchecked")
+    Map<String, String> result = (Map<String, String>) method.invoke(storePayrollService, List.of(config));
+
+    assertTrue(result.isEmpty());
+}
+
+
