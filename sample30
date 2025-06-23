@@ -1,0 +1,20 @@
+public static HttpHeaders toCIBHeaders(HttpHeaders headers, String srcEventId) {
+    HttpHeaders offlineHeaders = new HttpHeaders();
+
+    offlineHeaders.add(HttpHeader.ONLINE_PERSON_IDENTIFIER.getName(),
+        headers.getFirst(HttpHeader.ONLINE_PERSON_IDENTIFIER.getName()));
+
+    offlineHeaders.add(HttpHeader.PAYROLL_LOB.getName(), "CCB");
+
+    // Enhance TRACE_ID with srcEventId if available
+    String originalTraceId = headers.getFirst(HttpHeader.TRACE_ID.getName());
+    String enhancedTraceId = originalTraceId != null
+        ? originalTraceId + "::" + srcEventId
+        : srcEventId;
+
+    offlineHeaders.add(HttpHeader.TRACE_ID.getName(), enhancedTraceId);
+
+    log.debug("CIB PROXY Headers: {}", offlineHeaders);
+
+    return offlineHeaders;
+}
