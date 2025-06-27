@@ -18,3 +18,32 @@ public static HttpHeaders toCIBHeaders(HttpHeaders headers, String srcEventId) {
 
     return offlineHeaders;
 }
+try {
+    stepExecutor.execute(context);
+    context.setStatus(SUCCESS);
+    log.info("[PROCESSOR] Step '{}' executed successfully on attempt {}/{} for SRC Event ID: {}",
+        stepName, retryCount + 1, maxRetries, context.getSrcEventId());
+    return;
+
+} catch (Exception e) {
+    ProcessorException classified = (e instanceof ProcessorException)
+        ? (ProcessorException) e
+        : ExceptionClassifierUtil.classify(e, stepName);
+
+    if (classified.getType() == ProcessorExceptionType.BUSINESS_VALIDATION) {
+        log.warn("[PROCESSOR] Step '{}' failed with BUSINESS_VALIDATION on attempt {}/{}. Skipping retries. SRC Event ID: {}",
+            stepName, retryCount + 1, maxRetries, context.getSrcEventId());
+
+        handleException(stepConfig, context, classified, stepName, retryCount, maxRetries);
+        return; // stop further retries
+    }
+
+    retryCount++;
+    log.warn("[PROCESSOR] Step '{}' failed on attempt {}/{}. Retrying... Reason: {}, SRC Event ID: {}",
+        stepName, retryCount, maxRetries, classified.getMessage(), context.getSrcEventId());
+
+    if (retryCount >= maxRetries) {
+        handleException(stepConfig, context, classified, stepName, retryCount, maxRetries);
+        return;
+    }
+}
