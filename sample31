@@ -1,0 +1,125 @@
+import net.jpmchase.payroll.processor.service.*;
+import net.jpmchase.payroll.processor.steps.*;
+import net.jpmchase.payroll.processor.context.WorkflowContext;
+import net.jpmchase.payroll.processor.exception.*;
+import net.jpmchase.payroll.processor.model.*;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.MockitoAnnotations;
+
+import java.math.BigDecimal;
+import java.util.*;
+
+import static org.mockito.Mockito.*;
+import static org.junit.jupiter.api.Assertions.*;
+
+public class ReconcileEmployeePaymentInformationStepTest {
+
+    private ReconcileEmployeePaymentService reconcileService;
+    private PaymentConfigurationService paymentConfigurationService;
+    private WorkflowContext context;
+
+    private ReconcileEmployeePaymentInformationStep step;
+
+    @BeforeEach
+    public void setup() {
+        reconcileService = mock(ReconcileEmployeePaymentService.class);
+        paymentConfigurationService = mock(PaymentConfigurationService.class);
+        context = mock(WorkflowContext.class);
+        step = new ReconcileEmployeePaymentInformationStep(reconcileService, paymentConfigurationService);
+    }
+
+    @Test
+    public void testExecute_shouldSkipStepWhenNoCompensations() {
+        GetPayrollResponse payrollResponse = mock(GetPayrollResponse.class);
+        when(context.get(eq("GUSTO_SINGLE_PAYROLL"), eq(GetPayrollResponse.class))).thenReturn(payrollResponse);
+        when(payrollResponse.getEmployeeCompensations()).thenReturn(null);
+
+        step.execute(context);
+
+        verify(reconcileService, never()).reconcile(any(), any(), any());
+    }
+
+    @Test
+    public void testExecute_shouldThrowBusinessValidationExceptionWhenNoPaymentConfig() {
+        GetPayrollResponse payrollResponse = mock(GetPayrollResponse.class);
+        EnrollmentEntity enrollmentEntity = mock(EnrollmentEntity.class);
+
+        EmployeeCompensation comp = new EmployeeCompensation();
+        comp.setEmployeeId("emp123");
+        comp.setCheckAmount(BigDecimal.TEN);
+
+        when(context.get(eq("GUSTO_SINGLE_PAYROLL"), eq(GetPayrollResponse.class))).thenReturn(payrollResponse);
+        when(context.get(eq("COMPANY_ENROLLMENT"), eq(EnrollmentEntity.class))).thenReturn(enrollmentEntity);
+        when(context.get(eq("PYRL_UUID"), eq(String.class))).thenReturn("pyrl1");
+        when(context.get(eq("COMPANY_UUID"), eq(String.class))).thenReturn("company1");
+
+        when(payrollResponse.getEmployeeCompensations()).thenReturn(List.of(comp));
+        when(paymentConfigurationService.getAllEmployeePaymentConfigurationsForAPayroll(any(), any())).thenReturn(List.of());
+
+        ProcessorException ex = assertThrows(ProcessorException.class, () -> step.execute(context));
+        assertEquals(ProcessorExceptionType.BUSINESS_VALIDATION, ex.getType());
+    }
+
+    @Test
+    public void testExecute_shouldReconcileSuccessfully() {
+        GetPayrollResponse payrollResponse = mock(GetPayrollResponse.class);
+        EnrollmentEntity enrollmentEntity = mock(EnrollmentEntity.class);
+
+        EmployeeCompensation comp = new EmployeeCompensation();
+        comp.setEmployeeId("emp123");
+        comp.setCheckAmount(BigDecimal.TEN);
+
+        EmployeePaymentConfiguration config = new EmployeePaymentConfiguration();
+        config.setEmployeeId("emp123");
+
+        when(context.get(eq("GUSTO_SINGLE_PAYROLL"), eq(GetPayrollResponse.class))).thenReturn(payrollResponse);
+        when(context.get(eq("COMPANY_ENROLLMENT"), eq(EnrollmentEntity.class))).thenReturn(enrollmentEntity);
+        when(context.get(eq("PYRL_UUID"), eq(String.class))).thenReturn("pyrl1");
+        when(context.get(eq("COMPANY_UUID"), eq(String.class))).thenReturn("company1");
+
+        when(payrollResponse.getEmployeeCompensations()).thenReturn(List.of(comp));
+        when(paymentConfigurationService.getAllEmployeePaymentConfigurationsForAPayroll(any(), any()))
+            .thenReturn(List.of(config));
+
+        step.execute(context);
+
+        verify(reconcileService).reconcile(eq(comp), eq(config), eq(context));
+    }
+
+    @Test
+    public void testExecute_shouldPutConfigsInContext() {
+        GetPayrollResponse payrollResponse = mock(GetPayrollResponse.class);
+        EnrollmentEntity enrollmentEntity = mock(EnrollmentEntity.class);
+
+        EmployeeCompensation comp = new EmployeeCompensation();
+        comp.setEmployeeId("emp123");
+        comp.setCheckAmount(BigDecimal.TEN);
+
+        EmployeePaymentConfiguration config = new EmployeePaymentConfiguration();
+        config.setEmployeeId("emp123");
+
+        when(context.get(eq("GUSTO_SINGLE_PAYROLL"), eq(GetPayrollResponse.class))).thenReturn(payrollResponse);
+        when(context.get(eq("COMPANY_ENROLLMENT"), eq(EnrollmentEntity.class))).thenReturn(enrollmentEntity);
+        when(context.get(eq("PYRL_UUID"), eq(String.class))).thenReturn("pyrl1");
+        when(context.get(eq("COMPANY_UUID"), eq(String.class))).thenReturn("company1");
+
+        when(payrollResponse.getEmployeeCompensations()).thenReturn(List.of(comp));
+        when(paymentConfigurationService.getAllEmployeePaymentConfigurationsForAPayroll(any(), any()))
+            .thenReturn(List.of(config));
+
+        step.execute(context);
+
+        verify(context).putDeClonedList(eq("PAYROLL_EMP_CONFIGURATIONS"), eq(List.of(config)), eq(EmployeePaymentConfiguration.class));
+    }
+
+    @Test
+    public void testExecute_shouldLogAndReturnWhenConditionIsFalse() {
+        when(context.get(eq("CANCEL_GUSTO_PAYROLL"), eq(Boolean.class))).thenReturn(true);
+
+        step.execute(context);
+
+        verifyNoInteractions(paymentConfigurationService);
+        verifyNoInteractions(reconcileService);
+    }
+}
