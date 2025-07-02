@@ -1,56 +1,107 @@
-public void publishNewAccountsToSBP(
-        final List<Account> sbpAccounts,
-        final Long profileId,
-        final PayeeEntity payeeEntity,
-        final Map<String, PayeeAccountEntity> payeeAccountsUpdatedMap) {
+import net.jpmchase.payroll.processor.repository.mgmt.entity.payee.PayeeAccountEntity;
+import net.jpmchase.payroll.processor.repository.mgmt.entity.payee.PayeeEntity;
+import net.jpmchase.payroll.processor.service.CounterPartyService;
+import net.jpmchase.payroll.processor.service.PayeeAccountPersistenceService;
+import net.jpmchase.payroll.processor.service.PayeeAccountToSBPReconService;
+import net.jpmchase.payroll.processor.steps.utils.ProcessorException;
+import net.jpmchase.payroll.processor.steps.utils.ProcessorExceptionType;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
 
-    if (CollectionUtils.isEmpty(sbpAccounts)) {
-        return;
+import java.util.*;
+
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
+
+public class PayeeAccountToSBPReconServiceTest {
+
+    private CounterPartyService counterPartyService;
+    private PayeeAccountPersistenceService payeeAccountPersistenceService;
+    private PayeeAccountToSBPReconService service;
+
+    @BeforeEach
+    void setup() {
+        counterPartyService = mock(CounterPartyService.class);
+        payeeAccountPersistenceService = mock(PayeeAccountPersistenceService.class);
+        service = new PayeeAccountToSBPReconService(counterPartyService, payeeAccountPersistenceService);
     }
 
-    Try.of(() -> counterPartyService.addAccountsToACounterparty(profileId, payeeEntity.getCntrpId(), sbpAccounts))
-        .onSuccess(counterpartyAddResponse -> {
-            if (counterpartyAddResponse != null) {
+    @Test
+    void testPublishNewAccountsToSBP_successful() {
+        List<Account> sbpAccounts = List.of(new Account("acc1"));
+        PayeeEntity payee = new PayeeEntity();
+        payee.setCntprId("CNT123");
 
-                Optional.ofNullable(counterpartyAddResponse.getError())
-                    .ifPresent(error -> log.error("Counterparty: {} with profileId: {} failed to add accounts to SBP with error: {}",
-                            payeeEntity.getCntrpId(), profileId, error));
+        when(counterPartyService.addAccountsToCounterparty(anyLong(), anyString(), anyList()))
+                .thenReturn(Optional.of(new CounterPartyAccountAddResponse()));
 
-                Optional.ofNullable(counterpartyAddResponse.getAccountErrors())
-                    .filter(errors -> !CollectionUtils.isEmpty(errors))
-                    .ifPresent(errors -> errors.forEach(accountError -> {
-                        Optional.ofNullable(accountError.getAccountInfo())
-                            .map(AccountInfo::getPartnerAccountCorrelationIdentifier)
-                            .ifPresent(payeeAccountsUpdatedMap::remove);
+        assertDoesNotThrow(() ->
+                service.publishNewAccountsToSBP(sbpAccounts, 123L, payee, new HashMap<>())
+        );
+    }
 
-                        log.error("Counterparty: {} with profileId: {} failed to add account: {} in SBP with error: {}",
-                                payeeEntity.getCntrpId(), profileId, 
-                                accountError.getAccountIdentifier(), accountError.getError());
-                    }));
+    @Test
+    void testPublishNewAccountsToSBP_nullResponse_shouldThrow() {
+        List<Account> sbpAccounts = List.of(new Account("acc1"));
+        PayeeEntity payee = new PayeeEntity();
+        payee.setCntprId("CNT123");
 
-                Optional.ofNullable(counterpartyAddResponse.getAccounts())
-                    .filter(accounts -> !CollectionUtils.isEmpty(accounts))
-                    .ifPresent(accounts -> accounts.forEach(account -> {
-                        Optional.ofNullable(account.getPartnerAccountCorrelationIdentifier())
-                                .map(payeeAccountsUpdatedMap::get)
-                                .ifPresent(payeeAccountEntity -> 
-                                        payeeAccountEntity.setCntrpAcctId(account.getAccountIdentifier()));
-                    }));
-            } else {
-                log.error("Counterparty: {} with profileId: {} received a null response when adding accounts to SBP.",
-                        payeeEntity.getCntrpId(), profileId);
-            }
+        when(counterPartyService.addAccountsToCounterparty(anyLong(), anyString(), anyList()))
+                .thenReturn(Optional.empty());
 
-            List<PayeeAccountEntity> validAccounts = payeeAccountsUpdatedMap.values().stream()
-                    .filter(entity -> StringUtils.isNotBlank(entity.getCntrpAcctId()))
-                    .collect(Collectors.toList());
+        ProcessorException ex = assertThrows(ProcessorException.class, () ->
+                service.publishNewAccountsToSBP(sbpAccounts, 123L, payee, new HashMap<>())
+        );
+        assertEquals(ProcessorExceptionType.INFRA_RETRYABLE, ex.getType());
+    }
 
-            payeeAccountPersistenceService.saveAndFlushAllWithAudit(validAccounts);
-        })
-        .onFailure(throwable -> {
-            throw ProcessorException.of(
-                    ProcessorExceptionType.INFRA_RETRYABLE,
-                    PUBLISH_PAYEE_ACCOUNT_TO_SBP_FAILED.getCode(),
-                    PUBLISH_PAYEE_ACCOUNT_TO_SBP_FAILED);
-        });
+    @Test
+    void testPublishExistingAccountsToSBP_successful() {
+        List<Account> sbpAccounts = List.of(new Account("acc1"));
+        PayeeEntity payee = new PayeeEntity();
+        payee.setCntprId("CNT123");
+
+        when(counterPartyService.updateAccountForCounterparty(anyLong(), anyString(), any()))
+                .thenReturn(Optional.of(new CounterPartyAccountUpdateResponse()));
+
+        assertDoesNotThrow(() ->
+                service.publishExistingAccountsToSBP(sbpAccounts, 123L, payee)
+        );
+    }
+
+    @Test
+    void testPublishExistingAccountsToSBP_nullResponse_shouldThrow() {
+        List<Account> sbpAccounts = List.of(new Account("acc1"));
+        PayeeEntity payee = new PayeeEntity();
+        payee.setCntprId("CNT123");
+
+        when(counterPartyService.updateAccountForCounterparty(anyLong(), anyString(), any()))
+                .thenReturn(Optional.empty());
+
+        ProcessorException ex = assertThrows(ProcessorException.class, () ->
+                service.publishExistingAccountsToSBP(sbpAccounts, 123L, payee)
+        );
+        assertEquals(ProcessorExceptionType.INFRA_RETRYABLE, ex.getType());
+    }
+
+    @Test
+    void testGenerateSBPAccounts_returnsAccountsAndUpdatesMap() {
+        PayeeAccountEntity entity1 = new PayeeAccountEntity();
+        entity1.setCntprAcctId("ACCT123");
+        entity1.setSrcsBnkId("SBP01");
+
+        PayeeAccountEntity entity2 = new PayeeAccountEntity();
+        entity2.setCntprAcctId("ACCT456");
+        entity2.setSrcsBnkId("SBP02");
+
+        List<PayeeAccountEntity> payeeAccounts = List.of(entity1, entity2);
+        Map<String, PayeeAccountEntity> map = new HashMap<>();
+
+        List<Account> result = service.generateSBPAccounts(payeeAccounts, map);
+
+        assertEquals(2, result.size());
+        assertTrue(map.containsKey("SBP01"));
+        assertTrue(map.containsKey("SBP02"));
+    }
 }
