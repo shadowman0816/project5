@@ -123,3 +123,53 @@ public class ReconcileEmployeePaymentInformationStepTest {
         verifyNoInteractions(reconcileService);
     }
 }
+public void publishNewAccountsToSBP(
+        final List<Account> sbpAccounts,
+        final Long profileId,
+        final PayeeEntity payeeEntity,
+        final Map<String, PayeeAccountEntity> payeeAccountUpdatedMap) {
+
+    if (CollectionUtils.isEmpty(sbpAccounts)) return;
+
+    counterpartyService.addAccountsToACounterparty(profileId, payeeEntity.getCntrpId(), sbpAccounts)
+        .onSuccess(counterpartyAddResponse -> handleCounterpartyAddSuccess(
+            counterpartyAddResponse, profileId, payeeEntity, sbpAccounts, payeeAccountUpdatedMap))
+        .onFailure(error -> {
+            throw ProcessorException.of(
+                ProcessorExceptionType.INFRA_RETRYABLE,
+                PUBLISH_PAYEE_ACCOUNT_TO_SBP_FAILED.getCode(),
+                PUBLISH_PAYEE_ACCOUNT_TO_SBP_FAILED.getMessage()
+            );
+        });
+}
+
+private void handleCounterpartyAddSuccess(
+        CounterpartyAddResponse response,
+        Long profileId,
+        PayeeEntity payeeEntity,
+        List<Account> sbpAccounts,
+        Map<String, PayeeAccountEntity> payeeAccountUpdatedMap) {
+
+    Optional<CounterpartyError> errorOpt = Optional.ofNullable(response.getError());
+    errorOpt.ifPresent(error -> log.error(
+        "Counterparty ID {} with profileId {} failed to add accounts: {}",
+        payeeEntity.getCntrpId(), profileId, error.getMessage()
+    ));
+
+    List<PayeeAccountEntity> updatedAccounts = new ArrayList<>();
+
+    for (Account account : sbpAccounts) {
+        String acctId = account.getCounterIdentifier();
+        Optional<PayeeAccountEntity> payeeAcctOpt = Optional.ofNullable(payeeAccountUpdatedMap.get(acctId));
+
+        payeeAcctOpt.ifPresent(payeeAcct -> {
+            Optional<String> partnerAccountIdOpt = Optional.ofNullable(response.getAccountToPartnerAccountMap().get(acctId));
+            partnerAccountIdOpt.ifPresent(payeeAcct::setPrtnrAcctId);
+            updatedAccounts.add(payeeAcct);
+        });
+    }
+
+    if (!updatedAccounts.isEmpty()) {
+        payeeAccountPersistenceService.saveAndFlushAllWithAudit(updatedAccounts);
+    }
+}
