@@ -105,3 +105,15 @@ public class PayeeAccountToSBPReconServiceTest {
         assertTrue(map.containsKey("SBP02"));
     }
 }
+public static String resolvePaymentMethodFromPayeeAccount(PayeeAccountEntity account) {
+    if (account == null) return "CHECK";
+
+    String cntprAcctId = account.getCntprAcctId();
+    String status = account.getRteTypeCd(); // Adjust if incorrect field
+
+    if (StringUtils.isBlank(cntprAcctId) || "PENDING".equalsIgnoreCase(status)) {
+        return "CHECK";
+    }
+
+    return "DIRECT_DEPOSIT";
+}
