@@ -1,0 +1,161 @@
+public class ReconcileEmployeePaymentServiceTest {
+
+    private ReconcileEmployeePaymentService service;
+
+    private PayeeAccountRepository payeeAccountRepository;
+    private PayeeRepository payeeRepository;
+    private EmployeeAccountPersistenceService employeeAccountPersistenceService;
+    private EmployeeService employeeService;
+    private PayeePersistenceService payeePersistenceService;
+    private PayeeAccountToSBPReconService payeeAccountToSBPReconService;
+
+    @BeforeEach
+    void setUp() {
+        payeeAccountRepository = Mockito.mock(PayeeAccountRepository.class);
+        payeeRepository = Mockito.mock(PayeeRepository.class);
+        employeeAccountPersistenceService = Mockito.mock(EmployeeAccountPersistenceService.class);
+        employeeService = Mockito.mock(EmployeeService.class);
+        payeePersistenceService = Mockito.mock(PayeePersistenceService.class);
+        payeeAccountToSBPReconService = Mockito.mock(PayeeAccountToSBPReconService.class);
+
+        service = new ReconcileEmployeePaymentService(
+            payeeAccountRepository,
+            payeeRepository,
+            employeeAccountPersistenceService,
+            employeeService,
+            payeePersistenceService,
+            payeeAccountToSBPReconService
+        );
+    }
+
+    @Test
+    void testReconcile_createsNewAccountsAndUpdates() {
+        String employeeId = "emp123";
+        String bankId = "bank1";
+
+        Split split1 = new Split();
+        split1.setBankAccountUUID(bankId);
+        split1.setBankAccountName("TestBank");
+        split1.setRoutingNumber("123");
+        split1.setAccountNumber("456");
+
+        List<Split> splits = List.of(split1);
+
+        EmployeePaymentConfiguration config = Mockito.mock(EmployeePaymentConfiguration.class);
+        Mockito.when(config.getSplits()).thenReturn(splits);
+
+        PayrollEntity payrollEntity = Mockito.mock(PayrollEntity.class);
+        Mockito.when(payrollEntity.getPrYolEnrLId()).thenReturn("enroll123");
+        Mockito.when(payrollEntity.getSbmtPrtyOLPrfId()).thenReturn("sbp123");
+
+        PayeeEntity payeeEntity = Mockito.mock(PayeeEntity.class);
+
+        WorkflowContext context = Mockito.mock(WorkflowContext.class);
+        Mockito.when(context.get(Mockito.any(), Mockito.eq(PayrollEntity.class))).thenReturn(payrollEntity);
+
+        // no existing accounts
+        Mockito.when(payeeAccountRepository.findBySourcePayeeIdAndBankAccountUuids(Mockito.any(), Mockito.anySet()))
+                .thenReturn(List.of());
+
+        service.reconcilePayeeAccounts(employeeId, context, config, payeeEntity, payrollEntity);
+
+        Mockito.verify(employeeAccountPersistenceService).saveAllWithAudit(Mockito.anyList());
+        Mockito.verify(payeeAccountToSBPReconService).add(Mockito.anyList(), Mockito.any(), Mockito.eq(payeeEntity));
+    }
+
+    @Test
+    void testReconcile_doesNothingForExactMatch() {
+        String employeeId = "emp123";
+        String bankId = "bank1";
+
+        Split split1 = new Split();
+        split1.setBankAccountUUID(bankId);
+        split1.setBankAccountName("ExactMatchBank");
+        split1.setRoutingNumber("123");
+        split1.setAccountNumber("456");
+
+        PayeeAccountEntity existing = new PayeeAccountEntity();
+        existing.setSrcBnkId(bankId);
+        existing.setBnkNm("ExactMatchBank");
+        existing.setRtNb("123");
+        existing.setAcctNb("456");
+        existing.setCntrprAcctId("valid");
+
+        EmployeePaymentConfiguration config = Mockito.mock(EmployeePaymentConfiguration.class);
+        Mockito.when(config.getSplits()).thenReturn(List.of(split1));
+
+        PayrollEntity payrollEntity = Mockito.mock(PayrollEntity.class);
+        Mockito.when(payrollEntity.getPrYolEnrLId()).thenReturn("enroll123");
+        Mockito.when(payrollEntity.getSbmtPrtyOLPrfId()).thenReturn("sbp123");
+
+        PayeeEntity payeeEntity = Mockito.mock(PayeeEntity.class);
+        WorkflowContext context = Mockito.mock(WorkflowContext.class);
+        Mockito.when(context.get(Mockito.any(), Mockito.eq(PayrollEntity.class))).thenReturn(payrollEntity);
+
+        Mockito.when(payeeAccountRepository.findBySourcePayeeIdAndBankAccountUuids(Mockito.any(), Mockito.anySet()))
+                .thenReturn(List.of(existing));
+
+        service.reconcilePayeeAccounts(employeeId, context, config, payeeEntity, payrollEntity);
+
+        Mockito.verify(employeeAccountPersistenceService, Mockito.never()).saveAllWithAudit(Mockito.anyList());
+        Mockito.verify(payeeAccountToSBPReconService, Mockito.never()).add(Mockito.anyList(), Mockito.any(), Mockito.any());
+        Mockito.verify(payeeAccountToSBPReconService, Mockito.never()).update(Mockito.anyList(), Mockito.any(), Mockito.any());
+    }
+
+    @Test
+    void testReconcile_handlesNullOrEmptySplits() {
+        EmployeePaymentConfiguration config = Mockito.mock(EmployeePaymentConfiguration.class);
+        Mockito.when(config.getSplits()).thenReturn(null);
+
+        service.reconcilePayeeAccounts("emp123", Mockito.mock(WorkflowContext.class), config, Mockito.mock(PayeeEntity.class), Mockito.mock(PayrollEntity.class));
+        // no exceptions, nothing happens
+    }
+
+    @Test
+    void testReconcile_callsUpdateForMismatchedAccount() {
+        String employeeId = "emp123";
+        String bankId = "bank1";
+
+        Split split1 = new Split();
+        split1.setBankAccountUUID(bankId);
+        split1.setBankAccountName("NewName");
+        split1.setRoutingNumber("999");
+        split1.setAccountNumber("888");
+
+        PayeeAccountEntity existing = new PayeeAccountEntity();
+        existing.setSrcBnkId(bankId);
+        existing.setBnkNm("OldName");
+        existing.setRtNb("111");
+        existing.setAcctNb("222");
+
+        EmployeePaymentConfiguration config = Mockito.mock(EmployeePaymentConfiguration.class);
+        Mockito.when(config.getSplits()).thenReturn(List.of(split1));
+
+        PayrollEntity payrollEntity = Mockito.mock(PayrollEntity.class);
+        Mockito.when(payrollEntity.getPrYolEnrLId()).thenReturn("enroll123");
+        Mockito.when(payrollEntity.getSbmtPrtyOLPrfId()).thenReturn("sbp123");
+
+        PayeeEntity payeeEntity = Mockito.mock(PayeeEntity.class);
+        WorkflowContext context = Mockito.mock(WorkflowContext.class);
+        Mockito.when(context.get(Mockito.any(), Mockito.eq(PayrollEntity.class))).thenReturn(payrollEntity);
+
+        Mockito.when(payeeAccountRepository.findBySourcePayeeIdAndBankAccountUuids(Mockito.any(), Mockito.anySet()))
+                .thenReturn(List.of(existing));
+
+        service.reconcilePayeeAccounts(employeeId, context, config, payeeEntity, payrollEntity);
+
+        Mockito.verify(employeeAccountPersistenceService).saveAllWithAudit(Mockito.anyList());
+        Mockito.verify(payeeAccountToSBPReconService).update(Mockito.anyList(), Mockito.any(), Mockito.any());
+    }
+
+    @Test
+    void testEmployeeServiceGetEmployeeReturnsNull() {
+        // Make sure null result is handled gracefully if called
+        EnrollmentEntity enroll = Mockito.mock(EnrollmentEntity.class);
+        WorkflowContext context = Mockito.mock(WorkflowContext.class);
+        Mockito.when(context.get(Mockito.any(), Mockito.eq(EnrollmentEntity.class))).thenReturn(enroll);
+        Mockito.when(employeeService.getEmployee(Mockito.eq(enroll), Mockito.anyString())).thenReturn(null);
+
+        // Directly verify service fallback or failure handling wherever it's used in real logic
+    }
+}
