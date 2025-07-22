@@ -1,161 +1,138 @@
-public class ReconcileEmployeePaymentServiceTest {
+CREATE TABLE message_templates (
+    id UUID PRIMARY KEY,
+    template_code VARCHAR(100) NOT NULL UNIQUE,
+    channel VARCHAR(20) NOT NULL,
+    subject_template TEXT,
+    body_template TEXT NOT NULL,
+    variables JSONB, -- here
+    created_at TIMESTAMP DEFAULT now(),
+    updated_at TIMESTAMP DEFAULT now()
+);
 
-    private ReconcileEmployeePaymentService service;
+-- Find templates that use "payroll_id"
+SELECT * FROM message_templates
+WHERE variables @> '["payroll_id"]'::jsonb;
 
-    private PayeeAccountRepository payeeAccountRepository;
-    private PayeeRepository payeeRepository;
-    private EmployeeAccountPersistenceService employeeAccountPersistenceService;
-    private EmployeeService employeeService;
-    private PayeePersistenceService payeePersistenceService;
-    private PayeeAccountToSBPReconService payeeAccountToSBPReconService;
+SELECT template_code, jsonb_array_length(variables)
+FROM message_templates;
 
-    @BeforeEach
-    void setUp() {
-        payeeAccountRepository = Mockito.mock(PayeeAccountRepository.class);
-        payeeRepository = Mockito.mock(PayeeRepository.class);
-        employeeAccountPersistenceService = Mockito.mock(EmployeeAccountPersistenceService.class);
-        employeeService = Mockito.mock(EmployeeService.class);
-        payeePersistenceService = Mockito.mock(PayeePersistenceService.class);
-        payeeAccountToSBPReconService = Mockito.mock(PayeeAccountToSBPReconService.class);
+CREATE TABLE template_variants (
+    id UUID PRIMARY KEY,
+    template_definition_id UUID REFERENCES template_definitions(id),
+    channel VARCHAR(20) CHECK (channel IN ('EMAIL', 'DASHBOARD')),
+    locale VARCHAR(10) DEFAULT 'en_US',
+    subject_template TEXT,  -- optional
+    body_template TEXT NOT NULL,
+    version INTEGER DEFAULT 1,
+    variables JSONB,
+    is_active BOOLEAN DEFAULT true,
+    created_at TIMESTAMP DEFAULT now(),
+    updated_at TIMESTAMP DEFAULT now()
+);
 
-        service = new ReconcileEmployeePaymentService(
-            payeeAccountRepository,
-            payeeRepository,
-            employeeAccountPersistenceService,
-            employeeService,
-            payeePersistenceService,
-            payeeAccountToSBPReconService
-        );
+CREATE TABLE template_definitions (
+    id UUID PRIMARY KEY,
+    template_code VARCHAR(100) UNIQUE NOT NULL,
+    description TEXT,
+    is_active BOOLEAN DEFAULT true,
+    created_at TIMESTAMP DEFAULT now(),
+    updated_at TIMESTAMP DEFAULT now()
+);
+
+CREATE TABLE message_templates (
+    id UUID PRIMARY KEY,
+    
+    template_code VARCHAR(100) NOT NULL UNIQUE,
+    
+    channel VARCHAR(20) NOT NULL CHECK (channel IN ('EMAIL', 'DASHBOARD')),  -- optional if splitting by channel
+    
+    locale VARCHAR(10) DEFAULT 'en_US',  -- for future localization support
+    
+    subject_template TEXT,  -- only for EMAIL
+    body_template TEXT NOT NULL,
+    
+    variables JSONB,  -- list of expected variables (optional for validation/documentation)
+    
+    is_active BOOLEAN DEFAULT true,
+    
+    version INTEGER DEFAULT 1,
+    
+    created_at TIMESTAMP DEFAULT now(),
+    updated_at TIMESTAMP DEFAULT now()
+);
+{
+  "referenceId": "abc-123",
+  "channels": [
+    {
+      "channel": "EMAIL",
+      "to": "ops-team@yourcompany.com",
+      "subject": "Payroll Processing Failed",
+      "message": "Payroll abc-123 failed due to Insufficient funds."
+    },
+    {
+      "channel": "DASHBOARD",
+      "toUserId": "manager-001",
+      "message": "Payroll abc-123 failed due to Insufficient funds."
     }
+  ]
+}
+{
+  "payroll_id": "abc-123",
+  "reason": "Insufficient funds"
+}
+{
+  "templateCode": "PAYROLL_FAILURE",
+  "context": {
+    "payroll_id": "abc-123",
+    "reason": "Insufficient funds"
+  },
+  "referenceId": "abc-123",
+  "sendTo": {
+    "email": "ops-team@yourcompany.com",
+    "dashboardUserId": "manager-001"
+  },
+  "channels": ["EMAIL", "DASHBOARD"]
+}
 
-    @Test
-    void testReconcile_createsNewAccountsAndUpdates() {
-        String employeeId = "emp123";
-        String bankId = "bank1";
-
-        Split split1 = new Split();
-        split1.setBankAccountUUID(bankId);
-        split1.setBankAccountName("TestBank");
-        split1.setRoutingNumber("123");
-        split1.setAccountNumber("456");
-
-        List<Split> splits = List.of(split1);
-
-        EmployeePaymentConfiguration config = Mockito.mock(EmployeePaymentConfiguration.class);
-        Mockito.when(config.getSplits()).thenReturn(splits);
-
-        PayrollEntity payrollEntity = Mockito.mock(PayrollEntity.class);
-        Mockito.when(payrollEntity.getPrYolEnrLId()).thenReturn("enroll123");
-        Mockito.when(payrollEntity.getSbmtPrtyOLPrfId()).thenReturn("sbp123");
-
-        PayeeEntity payeeEntity = Mockito.mock(PayeeEntity.class);
-
-        WorkflowContext context = Mockito.mock(WorkflowContext.class);
-        Mockito.when(context.get(Mockito.any(), Mockito.eq(PayrollEntity.class))).thenReturn(payrollEntity);
-
-        // no existing accounts
-        Mockito.when(payeeAccountRepository.findBySourcePayeeIdAndBankAccountUuids(Mockito.any(), Mockito.anySet()))
-                .thenReturn(List.of());
-
-        service.reconcilePayeeAccounts(employeeId, context, config, payeeEntity, payrollEntity);
-
-        Mockito.verify(employeeAccountPersistenceService).saveAllWithAudit(Mockito.anyList());
-        Mockito.verify(payeeAccountToSBPReconService).add(Mockito.anyList(), Mockito.any(), Mockito.eq(payeeEntity));
+{
+  "referenceId": "abc-123",
+  "channels": [
+    {
+      "channel": "EMAIL",
+      "to": "ops-team@yourcompany.com",
+      "subject": "Payroll Processing Failed",
+      "message": "Payroll abc-123 failed due to Insufficient funds."
+    },
+    {
+      "channel": "DASHBOARD",
+      "toUserId": "manager-001",
+      "message": "Payroll abc-123 failed due to Insufficient funds."
     }
+  ]
+}
+public class NotificationService {
+    public void handleCommEvent(CommEvent event) {
+        Template template = templateRepo.findByCode(event.templateCode);
+        String body = interpolate(template.bodyTemplate, event.context);
+        String subject = template.subjectTemplate != null ? interpolate(template.subjectTemplate, event.context) : null;
 
-    @Test
-    void testReconcile_doesNothingForExactMatch() {
-        String employeeId = "emp123";
-        String bankId = "bank1";
+        List<ChannelPayload> payloads = new ArrayList<>();
 
-        Split split1 = new Split();
-        split1.setBankAccountUUID(bankId);
-        split1.setBankAccountName("ExactMatchBank");
-        split1.setRoutingNumber("123");
-        split1.setAccountNumber("456");
+        if (event.channels.contains("EMAIL")) {
+            payloads.add(new ChannelPayload("EMAIL", event.sendTo.email, subject, body, null));
+        }
+        if (event.channels.contains("DASHBOARD")) {
+            payloads.add(new ChannelPayload("DASHBOARD", null, null, body, event.sendTo.dashboardUserId));
+        }
 
-        PayeeAccountEntity existing = new PayeeAccountEntity();
-        existing.setSrcBnkId(bankId);
-        existing.setBnkNm("ExactMatchBank");
-        existing.setRtNb("123");
-        existing.setAcctNb("456");
-        existing.setCntrprAcctId("valid");
-
-        EmployeePaymentConfiguration config = Mockito.mock(EmployeePaymentConfiguration.class);
-        Mockito.when(config.getSplits()).thenReturn(List.of(split1));
-
-        PayrollEntity payrollEntity = Mockito.mock(PayrollEntity.class);
-        Mockito.when(payrollEntity.getPrYolEnrLId()).thenReturn("enroll123");
-        Mockito.when(payrollEntity.getSbmtPrtyOLPrfId()).thenReturn("sbp123");
-
-        PayeeEntity payeeEntity = Mockito.mock(PayeeEntity.class);
-        WorkflowContext context = Mockito.mock(WorkflowContext.class);
-        Mockito.when(context.get(Mockito.any(), Mockito.eq(PayrollEntity.class))).thenReturn(payrollEntity);
-
-        Mockito.when(payeeAccountRepository.findBySourcePayeeIdAndBankAccountUuids(Mockito.any(), Mockito.anySet()))
-                .thenReturn(List.of(existing));
-
-        service.reconcilePayeeAccounts(employeeId, context, config, payeeEntity, payrollEntity);
-
-        Mockito.verify(employeeAccountPersistenceService, Mockito.never()).saveAllWithAudit(Mockito.anyList());
-        Mockito.verify(payeeAccountToSBPReconService, Mockito.never()).add(Mockito.anyList(), Mockito.any(), Mockito.any());
-        Mockito.verify(payeeAccountToSBPReconService, Mockito.never()).update(Mockito.anyList(), Mockito.any(), Mockito.any());
-    }
-
-    @Test
-    void testReconcile_handlesNullOrEmptySplits() {
-        EmployeePaymentConfiguration config = Mockito.mock(EmployeePaymentConfiguration.class);
-        Mockito.when(config.getSplits()).thenReturn(null);
-
-        service.reconcilePayeeAccounts("emp123", Mockito.mock(WorkflowContext.class), config, Mockito.mock(PayeeEntity.class), Mockito.mock(PayrollEntity.class));
-        // no exceptions, nothing happens
-    }
-
-    @Test
-    void testReconcile_callsUpdateForMismatchedAccount() {
-        String employeeId = "emp123";
-        String bankId = "bank1";
-
-        Split split1 = new Split();
-        split1.setBankAccountUUID(bankId);
-        split1.setBankAccountName("NewName");
-        split1.setRoutingNumber("999");
-        split1.setAccountNumber("888");
-
-        PayeeAccountEntity existing = new PayeeAccountEntity();
-        existing.setSrcBnkId(bankId);
-        existing.setBnkNm("OldName");
-        existing.setRtNb("111");
-        existing.setAcctNb("222");
-
-        EmployeePaymentConfiguration config = Mockito.mock(EmployeePaymentConfiguration.class);
-        Mockito.when(config.getSplits()).thenReturn(List.of(split1));
-
-        PayrollEntity payrollEntity = Mockito.mock(PayrollEntity.class);
-        Mockito.when(payrollEntity.getPrYolEnrLId()).thenReturn("enroll123");
-        Mockito.when(payrollEntity.getSbmtPrtyOLPrfId()).thenReturn("sbp123");
-
-        PayeeEntity payeeEntity = Mockito.mock(PayeeEntity.class);
-        WorkflowContext context = Mockito.mock(WorkflowContext.class);
-        Mockito.when(context.get(Mockito.any(), Mockito.eq(PayrollEntity.class))).thenReturn(payrollEntity);
-
-        Mockito.when(payeeAccountRepository.findBySourcePayeeIdAndBankAccountUuids(Mockito.any(), Mockito.anySet()))
-                .thenReturn(List.of(existing));
-
-        service.reconcilePayeeAccounts(employeeId, context, config, payeeEntity, payrollEntity);
-
-        Mockito.verify(employeeAccountPersistenceService).saveAllWithAudit(Mockito.anyList());
-        Mockito.verify(payeeAccountToSBPReconService).update(Mockito.anyList(), Mockito.any(), Mockito.any());
-    }
-
-    @Test
-    void testEmployeeServiceGetEmployeeReturnsNull() {
-        // Make sure null result is handled gracefully if called
-        EnrollmentEntity enroll = Mockito.mock(EnrollmentEntity.class);
-        WorkflowContext context = Mockito.mock(WorkflowContext.class);
-        Mockito.when(context.get(Mockito.any(), Mockito.eq(EnrollmentEntity.class))).thenReturn(enroll);
-        Mockito.when(employeeService.getEmployee(Mockito.eq(enroll), Mockito.anyString())).thenReturn(null);
-
-        // Directly verify service fallback or failure handling wherever it's used in real logic
+        CIBPayload cibPayload = new CIBPayload(event.referenceId, event.templateCode, payloads);
+        publishToCIB(cibPayload);
     }
 }
+
+
+
+
+
+
+
