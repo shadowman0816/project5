@@ -1,0 +1,11 @@
+Before I head out for my vacation next week, I wanted to share the latest status update on the three JIRAs related to the Communicator/Notification Service:
+	1.	Communicator/Notification Service Deployment:
+Successfully deployed in the dev environment. All runtime configurations and SQS connectivity have been established and verified.
+	2.	Message Producer Implementation:
+The producer logic to publish messages to the SQS queue has been completed.
+	3.	KMS & RPU Setup:
+Currently in progress. This includes the necessary encryption and permission configurations.
+	4.	QA Environment Migration:
+Pending. This will begin once the KMS setup is completed.
+
+Please let me know if you need anything else before I sign off.
