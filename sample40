@@ -1,0 +1,239 @@
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
+
+@Getter
+@Setter
+@NoArgsConstructor
+@AllArgsConstructor
+public class BillingRequestHeaders {
+
+    @NotBlank
+    private String authorization;
+
+    @NotBlank
+    private String clientId;
+
+    private String tracId;
+    private String correlationIdentifier;
+
+    @NotBlank
+    private String requestId;
+
+    private String userAgent;
+    private String userId;
+    private String sessionId;
+    private String sessionCache;
+    private String podId;
+
+    private Double onlineProfileIdentifier;
+    private String relatedEnterprisePartyIdentifier;
+    private String actorEnterprisePartyIdentifier;
+}
+
+@Component
+public class BillingHeaderArgumentResolver implements HandlerMethodArgumentResolver {
+
+    @Autowired
+    private javax.validation.Validator validator;
+
+    @Override
+    public boolean supportsParameter(MethodParameter parameter) {
+        return BillingRequestHeaders.class.isAssignableFrom(parameter.getParameterType());
+    }
+
+    @Override
+    public Object resolveArgument(MethodParameter parameter, 
+                                  ModelAndViewContainer mavContainer,
+                                  NativeWebRequest webRequest,
+                                  WebDataBinderFactory binderFactory) throws Exception {
+        BillingRequestHeaders headers = new BillingRequestHeaders();
+
+        headers.setAuthorization(webRequest.getHeader("authorization"));
+        headers.setClientId(webRequest.getHeader("clientId"));
+        headers.setTracId(webRequest.getHeader("tracId"));
+        headers.setCorrelationIdentifier(webRequest.getHeader("correlationIdentifier"));
+        headers.setRequestId(webRequest.getHeader("requestId"));
+        headers.setUserAgent(webRequest.getHeader("userAgent"));
+        headers.setUserId(webRequest.getHeader("userId"));
+        headers.setSessionId(webRequest.getHeader("sessionId"));
+        headers.setSessionCache(webRequest.getHeader("sessionCache"));
+        headers.setPodId(webRequest.getHeader("podId"));
+
+        String profile = webRequest.getHeader("onlineProfileIdentifier");
+        if (profile != null) {
+            try {
+                headers.setOnlineProfileIdentifier(Double.parseDouble(profile));
+            } catch (NumberFormatException ex) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid onlineProfileIdentifier format");
+            }
+        }
+
+        headers.setRelatedEnterprisePartyIdentifier(webRequest.getHeader("relatedEnterprisePartyIdentifier"));
+        headers.setActorEnterprisePartyIdentifier(webRequest.getHeader("actorEnterprisePartyIdentifier"));
+
+        // 🚨 Validate
+        Set<ConstraintViolation<BillingRequestHeaders>> violations = validator.validate(headers);
+        if (!violations.isEmpty()) {
+            String errorMessages = violations.stream()
+                    .map(v -> v.getPropertyPath() + " " + v.getMessage())
+                    .collect(Collectors.joining(", "));
+
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Header validation failed: " + errorMessages);
+        }
+
+        return headers;
+    }
+}
+
+@RestController
+@RequestMapping("/api")
+@RequiredArgsConstructor
+@Validated
+public class BillingController {
+
+    private final CompanyManagementService companyManagementService;
+
+    @PostMapping(
+        path = "/billing-details",
+        consumes = MediaType.APPLICATION_JSON_VALUE,
+        produces = MediaType.APPLICATION_JSON_VALUE
+    )
+    public ResponseEntity<CustomerBillingInformationResponse> getBillingDetails(
+        @Valid BillingRequestHeaders headers, // auto-bound with @ModelAttribute
+        @Valid @RequestBody CustomerBillingInformationRequest request
+    ) {
+        // Validate business logic: endDate must not be before startDate
+        if (request.getEndDate() != null && request.getStartDate() != null &&
+            request.getEndDate().isBefore(request.getStartDate())) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "End date cannot be before start date.");
+        }
+
+        // Proceed with business logic
+        List<CompanyPartyIdentifier> ids = request.getCompanyPartyIdentifiers();
+        ids.forEach(identifier -> {
+            companyManagementService.getCompanyByIdAndEId(
+                identifier.getCompanyIdentifier(),
+                identifier.getRelatedEnterprisePartyIdentifier()
+            );
+        });
+
+        return ResponseEntity.ok(new CustomerBillingInformationResponse());
+    }
+}
+
+@RestControllerAdvice
+public class GlobalExceptionHandler {
+
+    @ExceptionHandler(MethodArgumentNotValidException.class)
+    public ResponseEntity<String> handleValidationError(MethodArgumentNotValidException ex) {
+        String errorMessage = ex.getBindingResult().getAllErrors().stream()
+            .map(DefaultMessageSourceResolvable::getDefaultMessage)
+            .collect(Collectors.joining("; "));
+        return ResponseEntity.badRequest().body(errorMessage);
+    }
+
+    @ExceptionHandler(ResponseStatusException.class)
+    public ResponseEntity<String> handleResponseStatus(ResponseStatusException ex) {
+        return ResponseEntity.status(ex.getStatusCode()).body(ex.getReason());
+    }
+}
+
+@Service
+@RequiredArgsConstructor
+@Slf4j
+public class CompanyManagementService {
+
+    private final EnrollmentRepository enrollmentRepository;
+
+    public CompanyDetails getCompanyByIdAndEpf(String companyId, String enterprisePartyIdentifier) {
+        return enrollmentRepository.getEnrollmentEntitiesByCompanyIdAndEnterprisePartyIdentifier(companyId, enterprisePartyIdentifier)
+                .map(this::toCompanyDetails)
+                .orElseThrow(() -> new ResourceNotFoundException("Company not found"));
+    }
+
+    private CompanyDetails toCompanyDetails(EnrollmentEntity entity) {
+        return CompanyDetails.builder()
+                .companyId(entity.getCompanyId())
+                .enterprisePartyIdentifier(entity.getEnterprisePartyIdentifier())
+                .businessName(entity.getBusinessName())
+                .build();
+    }
+}
+
+@Service
+@RequiredArgsConstructor
+@Slf4j
+public class PayeeManagementService {
+
+    private final PayeeRepository payeeRepository;
+
+    public List<PayeeDetails> getPayeesByCompanyId(String companyId) {
+        return payeeRepository.findByCompanyId(companyId).stream()
+                .map(this::toPayeeDetails)
+                .toList();
+    }
+
+    private PayeeDetails toPayeeDetails(PayeeEntity entity) {
+        return PayeeDetails.builder()
+                .payeeId(entity.getPayeeId())
+                .payeeName(entity.getPayeeName())
+                .bankAccountNumber(entity.getBankAccountNumber())
+                .build();
+    }
+}
+
+@Service
+@RequiredArgsConstructor
+@Slf4j
+public class PaymentManagementService {
+
+    private final PayrollTransactionRepository transactionRepository;
+
+    public List<PaymentDetails> getPaymentsByCompanyAndDate(String companyId, LocalDate startDate, LocalDate endDate) {
+        return transactionRepository.findByCompanyIdAndDateRange(companyId, startDate, endDate).stream()
+                .map(this::toPaymentDetails)
+                .toList();
+    }
+
+    private PaymentDetails toPaymentDetails(PayrollTransactionEntity entity) {
+        return PaymentDetails.builder()
+                .transactionId(entity.getTransactionId())
+                .amount(entity.getAmount())
+                .transactionDate(entity.getTransactionDate())
+                .build();
+    }
+}
+
+@Repository
+public interface EnrollmentRepository extends JpaRepository<EnrollmentEntity, String> {
+
+    @Query(value = "SELECT * FROM pyrl_enrl.pyr_enrl WHERE src_co_id = :companyId AND rel_ent_prty_id = :enterprisePartyIdentifier", nativeQuery = true)
+    Optional<EnrollmentEntity> getEnrollmentEntitiesByCompanyIdAndEnterprisePartyIdentifier(@Param("companyId") String companyId, 
+                                                                                             @Param("enterprisePartyIdentifier") String epf);
+}
+
+public interface PayeeRepository extends JpaRepository<PayeeEntity, String> {
+    List<PayeeEntity> findByCompanyId(String companyId);
+}
+
+public interface PayrollTransactionRepository extends JpaRepository<PayrollTransactionEntity, String> {
+
+    @Query("SELECT p FROM PayrollTransactionEntity p WHERE p.companyId = :companyId AND p.transactionDate BETWEEN :start AND :end")
+    List<PayrollTransactionEntity> findByCompanyIdAndDateRange(@Param("companyId") String companyId,
+                                                               @Param("start") LocalDate startDate,
+                                                               @Param("end") LocalDate endDate);
+}
+
+@ResponseStatus(HttpStatus.BAD_REQUEST)
+public class InvalidRequestHeaderException extends RuntimeException {
+    public InvalidRequestHeaderException(String message) {
+        super(message);
+    }
+}
+
+@ResponseStatus(HttpStatus.NOT_FOUND)
+public class ResourceNotFoundException extends RuntimeException {
+    public ResourceNotFoundException(String message) {
+        super(message);
+    }
+}
