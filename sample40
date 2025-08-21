@@ -237,3 +237,28 @@ public class ResourceNotFoundException extends RuntimeException {
         super(message);
     }
 }
+
+@RestController
+@RequestMapping("/billing")
+@RequiredArgsConstructor
+@Slf4j
+public class BillingController {
+
+    private final CompanyManagementService companyService;
+    private final PayeeManagementService payeeService;
+    private final PaymentManagementService paymentService;
+
+    @PostMapping("/info")
+    public ResponseEntity<CustomerBillingInformationResponse> getBillingInfo(
+            @Valid @RequestBody CustomerBillingInformationRequest request,
+            BillingRequestHeaders headers) {
+
+        CustomerBillingInformationResponse response = new CustomerBillingInformationResponse();
+
+        response.setCompanyDetails(companyService.getCompanyByIdAndEpf(headers.companyId(), headers.enterprisePartyId()));
+        response.setPayeeDetails(payeeService.getPayeesByCompanyId(headers.companyId()));
+        response.setPaymentDetails(paymentService.getPaymentsByCompanyAndDate(headers.companyId(), request.getStartDate(), request.getEndDate()));
+
+        return ResponseEntity.ok(response);
+    }
+}
