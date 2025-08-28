@@ -262,3 +262,18 @@ public class BillingController {
         return ResponseEntity.ok(response);
     }
 }
+
+@Configuration
+public class WebConfig implements WebMvcConfigurer {
+
+    private final BillingRequestHeaderResolver billingRequestHeaderResolver;
+
+    public WebConfig(BillingRequestHeaderResolver billingRequestHeaderResolver) {
+        this.billingRequestHeaderResolver = billingRequestHeaderResolver;
+    }
+
+    @Override
+    public void addArgumentResolvers(List<HandlerMethodArgumentResolver> resolvers) {
+        resolvers.add(billingRequestHeaderResolver);
+    }
+}
