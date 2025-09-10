@@ -277,7 +277,16 @@ public class WebConfig implements WebMvcConfigurer {
         resolvers.add(billingRequestHeaderResolver);
     }
 }We’re currently troubleshooting an issue on our end where the MultiInstructionResponse is being flagged as “no responses found” for a given contractorPaymentGroupId (e.g., fc53c2de-0d17-4290-b037-aace1eaa307e).
-
+1.	Disbursement API (Contractor Payment)
+	•	Contractor payments are posting to PIM, but the response is failing to read correctly.
+	•	The system returns “no multi-instructions found”, which makes the disbursement process think no disbursement happened.
+	•	Because of this, the Custodial API call is not triggered.
+	2.	Disbursement Status Issue
+	•	When a disbursement call is triggered, the table was incorrectly updated with a cancel status.
+	•	That status prevented the disbursement API from being called for both payroll and contractor payments.
+	•	✅ This issue has already been fixed today.
+	3.	QAC2 CR Environment
+	•	Currently, when logging in with my user ID, I’m not able to run any payrolls in the QAC2 CR environment.
 However, upon inspecting the response object, we do see the groupTransactionIdentifier populated and at least one InstructionResponse present in the list. That said, most fields inside the InstructionResponse (e.g., transactionAmountDetails, sourcePaymentStatusCode, transactionIdentifier, etc.) appear to be null or incomplete — which is likely why the downstream processor is skipping over them.
 
 Could you please confirm:
