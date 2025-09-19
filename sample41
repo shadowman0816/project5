@@ -1,0 +1,389 @@
+Got it. Let’s wire a clean, production-ready Store-and-Forward Recon Workflow that reads your pyrl_rtry_outbox rows, repackages them as a canonical “SaF event”, and publishes to KSAS (Kafka) so the Processor consumes them through its existing workflow.
+
+I’ll use the fields you showed (pyrl_rtry_outbox) and your YAML conventions.
+
+⸻
+
+1) End-to-end flow (at a glance)
+	1.	Processor catches a retriable failure → writes a row in pyrl_rtry_outbox (PENDING) with:
+	•	pyrl_rtry_id (local retry id),
+	•	src_evt_id (Gusto event id),
+	•	src_co_id (Gusto company id),
+	•	jny_nm (e.g., payroll.processed, contractor_payment_group.created),
+	•	ent_id (domain id: payroll UUID, employee UUID, contractor payment UUID…),
+	•	step_nm (failed step name from workflow),
+	•	rtry_cn (attempt so far),
+	•	sts_cd + sts_rsn_tx (status & reason),
+	•	ent_typ_nm (PAYROLL | EMPLOYEE | BANK_ACCOUNT | CONTRACTOR_PAYMENT),
+	•	expr_ts (next eligible time == next_run_ts),
+	•	audit columns.
+	2.	Recon app runs every N minutes:
+	•	Claims due rows (PENDING & expr_ts <= now()) with FOR UPDATE SKIP LOCKED.
+	•	Marks them IN_PROGRESS.
+	•	Builds a canonical SaF message from the row.
+	•	Publishes to KSAS topic (Kafka) with idempotency headers.
+	•	On publish success → marks row DONE.
+	•	On publish failure → increments rtry_cn, recomputes expr_ts via backoff, restores PENDING, or marks FAILED if limits/cutoff exceeded.
+	3.	Processor consumes the SaF message and re-executes the targeted step idempotently (using the idempotency key carried with the message).
+
+⸻
+
+2) Canonical SaF message (Kafka → Processor)
+
+Topic: choose by journey or entity type (your call). Two popular mappings:
+	•	Per journey: payroll.saf.retry, contractor_payment.saf.retry, …
+	•	Per entity type: pyrl.saf.retry, emp.saf.retry, …
+
+Partition key: ent_id (ensures per-entity ordering).
+(Optional) If you later need strict step order, move to a FIFO-style pattern on the consumer side with a per-entity in-process guard.
+
+Payload (JSON):
+{
+  "saf": {
+    "retryId": "<pyrl_rtry_id>",
+    "attempt": <rtry_cn>,
+    "nextEligibleTs": "<expr_ts ISO>",
+    "origin": "retry-outbox"
+  },
+  "source": {
+    "eventId": "<src_evt_id>",
+    "companyId": "<src_co_id>"
+  },
+  "routing": {
+    "journey": "<jny_nm>",
+    "entityType": "<ent_typ_nm>",
+    "entityId": "<ent_id>",
+    "targetStep": "<step_nm>"
+  },
+  "status": {
+    "code": "<sts_cd>",
+    "reason": "<sts_rsn_tx>"
+  }
+}
+Headers (Kafka record headers) — used by Processor for dedupe/trace:
+	•	x-saf-retry-id = pyrl_rtry_id
+	•	x-saf-attempt = rtry_cn
+	•	x-saf-next-eligible = ISO of expr_ts
+	•	x-saf-idempotency-key = src_evt_id + ":" + jny_nm + ":" + step_nm  (stable across retries)
+	•	x-saf-journey = jny_nm
+	•	x-saf-entity-id = ent_id
+	•	x-saf-entity-type = ent_typ_nm
+	•	x-trace-id = propagate existing if you have it
+
+If the original full event payload is needed, you can either 1) re-hydrate it from your DB by src_evt_id/ent_id, or 2) add a payload_json column later. For now, above fields are sufficient for the Processor to resume.
+
+
+workflow:
+  retryEnabled: true
+  retryConfigs:
+    retryBackoffMs: 100
+    maxRetryCount: 3
+  safEnabled: true
+  safConfigs:
+    maxBackoffHours: 3
+    cutoffTime: "18:30"
+
+  groups:
+    SaFRecon:
+      retryEnabled: true
+      retryConfigs:
+        retryBackoffMs: 100
+        maxRetryCount: 3
+      safEnabled: true
+      safConfigs:
+        maxBackoffHours: 3
+        cutoffTime: "18:30"
+
+      events:
+        [retry_outbox.reconcile]:
+          # This event is fired by a @Scheduled cron every 15/30 minutes
+          steps:
+            - name: ClaimDueRetryRows      # DB claim with SKIP LOCKED
+            - name: BuildSaFMessages       # Row -> Canonical SaF JSON + headers
+            - name: PublishToKSAS          # Kafka publish with proper key & headers
+            - name: MarkOutcomeInDatabase  # DONE or re-schedule with backoff
+
+WITH cte AS (
+  SELECT pyrl_rtry_id
+  FROM pyrl_rtry_outbox
+  WHERE sts_cd = 'PENDING'        -- or 0 if numeric
+    AND expr_ts <= now()
+  ORDER BY expr_ts
+  LIMIT :batch
+  FOR UPDATE SKIP LOCKED
+)
+UPDATE pyrl_rtry_outbox o
+   SET sts_cd = 'IN_PROGRESS',
+       updt_ts = now(),
+       updt_usr_id = :jobUser
+  FROM cte
+ WHERE o.pyrl_rtry_id = cte.pyrl_rtry_id
+RETURNING o.*;
+
+UPDATE pyrl_rtry_outbox
+   SET sts_cd = 'DONE', updt_ts = now(), updt_usr_id = :jobUser
+ WHERE pyrl_rtry_id = :id;
+
+UPDATE pyrl_rtry_outbox
+   SET sts_cd      = CASE 
+                        WHEN (rtry_cn + 1) >= :maxAttempts OR (now() + (:delay || ' milliseconds')::interval) > :cutoffTs 
+                          THEN 'FAILED' 
+                        ELSE 'PENDING' 
+                     END,
+       rtry_cn     = rtry_cn + 1,
+       expr_ts     = CASE 
+                        WHEN (rtry_cn) >= :maxAttempts OR (now() + (:delay || ' milliseconds')::interval) > :cutoffTs 
+                          THEN expr_ts      -- terminal; expr_ts unchanged
+                        ELSE now() + (:delay || ' milliseconds')::interval
+                     END,
+       sts_rsn_tx  = :lastError,
+       updt_ts     = now(),
+       updt_usr_id = :jobUser
+ WHERE pyrl_rtry_id = :id;
+
+
+Backoff computer (unified with your precedence rules)
+
+Use the same RetryScheduleService rules you already use on the Processor side; the Recon job must not invent new policy—only apply the stored or computed policy.
+public final class Backoff {
+  public static BackoffResult compute(int attempt, long baseMs, double factor, long jitterMs,
+                                      Instant now, Instant cutoff) {
+    long delay = (long) (baseMs * Math.pow(factor, attempt)) 
+               + ThreadLocalRandom.current().nextLong(0, jitterMs + 1);
+    Instant next = now.plusMillis(delay);
+    boolean ok = (next.isBefore(cutoff));
+    return new BackoffResult(ok, next, delay);
+  }
+}
+@Service
+public class SafReconService {
+  @Transactional
+  public List<RetryRow> claim(int batch) { return repo.claimDue(batch); }
+
+  public SafMessage build(RetryRow r) { /* map columns -> JSON + headers */ }
+
+  public void publish(SafMessage m) { kafka.send(m.topic(), m.key(), m.headers(), m.payload()); }
+
+  @Transactional
+  public void onSuccess(String retryId) { repo.markDone(retryId); }
+
+  @Transactional
+  public void onFailure(RetryRow r, Exception ex, BackoffPolicy p) {
+    var br = Backoff.compute(r.getRtryCn(), p.baseMs(), p.factor(), p.jitterMs(), Instant.now(), p.cutoff());
+    repo.rescheduleOrFail(r.getPyrlRtryId(), safeMsg(ex), p.maxAttempts(), Duration.ofMillis(br.delayMs()), p.cutoff());
+  }
+}
+@Component
+public class SafReconJob {
+  @Scheduled(cron = "${saf.recon.cron:0 */15 * * * *}") // every 15 mins
+  public void run() {
+    var rows = service.claim(batchSize);
+    for (var r : rows) {
+      try {
+        var msg = service.build(r);
+        service.publish(msg);
+        service.onSuccess(r.getPyrlRtryId());
+      } catch (Exception ex) {
+        service.onFailure(r, ex, policyFor(r)); // from YAML precedence or row-config
+      }
+    }
+  }
+}
+
+idemKey = src_evt_id + ":" + jny_nm + ":" + step_nm
+Outbox column
+In message
+Notes
+pyrl_rtry_id
+saf.retryId & header x-saf-retry-id
+DB pk
+rtry_cn
+saf.attempt & header x-saf-attempt
+current attempt
+expr_ts
+saf.nextEligibleTs & header x-saf-next-eligible
+ISO
+src_evt_id
+source.eventId & part of idempotency key
+stable
+src_co_id
+source.companyId
+jny_nm
+routing.journey & header x-saf-journey
+e.g., payroll.processed
+ent_typ_nm
+routing.entityType & header x-saf-entity-type
+PAYROLL/EMPLOYEE/…
+ent_id
+routing.entityId & header x-saf-entity-id
+Kafka key
+step_nm
+routing.targetStep & part of idempotency key
+where to resume
+sts_cd
+status.code
+sts_rsn_tx
+status.reason
+
+<src_evt_id>:<jny_nm>:<step_nm>
+
+great question — on the processor side, you’ve got three realistic ways to re-enter a workflow after SaF. Below are the options, how they look in your YAML/engine, and the trade-offs. I’ll end with a crisp recommendation + guardrails.
+
+Option 1 — Resume at the Failed Step (targeted re-entry)
+
+Idea: The SaF message carries {journey, targetStep, entityId}. The processor routes straight into targetStep and continues normally from there.
+
+How to wire
+	•	Add a Router at processor ingress that sets context.retry.startAt = targetStep.
+	•	Either:
+	•	(A) use an engine feature to jump to startAt, or
+	•	(B) keep a single workflow and add executeOnCondition to every preceding step so they no-op when context.retry.startAt is after them.
+
+events:
+  [payroll.processed]:
+    steps:
+      - name: ReadIncomingPayrollEvent
+        executeOnCondition: "#{ ctx.retry == null || ctx.retry.startAt == null || order('ReadIncomingPayrollEvent') <= order(ctx.retry.startAt) }"
+      - name: ValidateCustomerInternalEligibility
+        executeOnCondition: "#{ order('ValidateCustomerInternalEligibility') >= order(ctx.retry.startAt) }"
+      - name: ReconcileEmployeeWithSBP
+        executeOnCondition: "#{ order('ReconcileEmployeeWithSBP') >= order(ctx.retry.startAt) }"
+      # etc...
+
+Implement order(stepName) as a tiny helper map so conditions stay simple.
+
+Pros
+	•	Fastest recovery; redoes only what failed.
+	•	Minimal partner/system side-effects when upstream was fine.
+	•	Best for infra/transient failures (HTTP 5xx, timeouts, broker hiccups).
+
+Cons
+	•	Every step must be re-entrant and idempotent on its own.
+	•	If earlier context is stale (state drift), you can resume with wrong assumptions.
+	•	More complex routing/conditions.
+
+Use when
+	•	Failure class = INFRA_RETRYABLE.
+	•	The failed step has no irreversible side-effects, or those side-effects are idempotent.
+
+⸻
+
+Option 2 — Restart from the Beginning (full replay)
+
+Idea: Ignore targetStep and re-run the entire workflow for that journey/entity.
+
+How to wire
+	•	Route SaF to the standard event ([payroll.processed]) without startAt.
+	•	Keep existing YAML; no conditional gates needed.
+	•	Ensure idempotency guards on each external side-effect (DB upserts, SBP updates, Gusto calls with idempotency keys).
+
+Pros
+	•	Safest from a correctness standpoint; refreshes all derived state.
+	•	Easiest to maintain (no step-ordering condition logic).
+	•	Naturally handles upstream changes (e.g., Gusto status drift).
+
+Cons
+	•	More load and partner calls; might hit rate limits.
+	•	Must guarantee global idempotency across all steps — “did we already send this to PIM/SBP?”.
+	•	Slower time-to-recovery for late-stage failures.
+
+Use when
+	•	Failure class = business/data drift or validation failures where earlier checks need to re-evaluate.
+	•	Any step has side-effects that are easier to dedupe globally than to surgically resume.
+
+⸻
+
+Option 3 — Restart from a Checkpoint (Phase) (group/phase re-entry)
+
+Idea: Define checkpoints (e.g., ingest → validate → reconcile → persist → notify). On SaF, start from the nearest checkpoint before the failed step.
+
+How to wire
+	•	Add group boundaries in YAML (you already have groups: Payroll, ContractorPaymentGroup).
+	•	Maintain a checkpointIndex per step (tiny map).
+	•	Router sets ctx.retry.startAtCheckpoint.
+	•	Preceding checkpoints skip via executeOnCondition.
+
+groups:
+  Payroll:
+    phases:
+      - name: INGEST
+      - name: VALIDATE
+      - name: RECONCILE
+      - name: PERSIST
+      - name: NOTIFY
+# each step tagged with a phase; condition runs if step.phase.index >= ctx.retry.startAtCheckpoint
+
+Pros
+	•	Balance of correctness and efficiency.
+	•	Fewer conditional branches vs step-level resume.
+	•	Lets you re-do safety-critical phases (e.g., VALIDATE) without re-ingesting everything.
+
+Cons
+	•	Requires a clear, stable phase taxonomy and mapping.
+	•	Some repeated work relative to step-resume; more complexity than full replay.
+
+Use when
+	•	Your journeys naturally split into phases with clean boundaries.
+	•	Teams are okay with limited rework for stronger guarantees.
+
+⸻
+
+Option 4 — Step Self-Heal Wrapper (micro-retries inside the step)
+
+Idea: Keep the workflow unchanged. A failing step catches infra errors and self-retries with backoff before bubbling up to SaF.
+
+Pros
+	•	Hides transient flakiness from the workflow engine; fewer outbox rows.
+	•	Good for very flaky integrations.
+
+Cons
+	•	Logic duplicative of central SaF; observability can suffer.
+	•	Risk of long step latency blocking the pipeline.
+
+Use when
+	•	A specific partner call is notoriously flaky and fast to retry.
+	•	You set tight caps (e.g., 2 immediate quick retries) then hand off to SaF.
+
+⸻
+
+Decision matrix (quick)
+
+Dimension
+Resume at Step
+Restart from Checkpoint
+Restart from Beginning
+Correctness under drift
+Medium
+High
+Highest
+External call volume
+Lowest
+Medium
+Highest
+Code complexity
+High (per-step gates)
+Medium (phase gates)
+Low
+Recovery speed (late failure)
+Fastest
+Fast
+Slow
+Idempotency burden
+Local (per step)
+Per phase
+Global (all steps)
+Best for
+Infra failures
+Mixed
+Business/validation
+
+
+
+
+
+
+
+
+
+
+
