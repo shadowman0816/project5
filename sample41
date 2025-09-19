@@ -380,6 +380,28 @@ Business/validation
 
 
 
+⸻
+
+What I recommend (for your system)
+
+A hybrid policy that picks the re-entry mode by exception type & step class:
+	1.	Default = Resume at Step
+	•	For INFRA_RETRYABLE exceptions.
+	•	Preconditions: the step declares idempotent=true and has no irreversible side-effects (or uses idempotency keys with partners).
+	•	Router sets ctx.retry.startAt = targetStep.
+	2.	Restart from Checkpoint
+	•	For steps in phases VALIDATE or RECONCILE where upstream data may drift.
+	•	Router computes startAtCheckpoint = previousCheckpoint(targetStep).
+	3.	Restart from Beginning
+	•	For BUSINESS_VALIDATION failures when you intend to re-evaluate everything (or when the entity state on Gusto/SBP is likely changed).
+	•	Also the safe fallback if a step isn’t marked re-entrant.
+	4.	Guardrails (must-haves)
+
+	•	Maintain a tiny Step Catalog (YAML or code map):
+	•	idempotent: true|false
+	•	phase: INGEST|VALIDATE|RECONCILE|PERSIST|NOTIFY
+	•	requiresFreshContext: true|false
+	•	Router chooses mode using:
 
 
 
